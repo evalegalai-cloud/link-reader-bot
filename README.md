@@ -146,6 +146,19 @@ docker compose logs -f --tail=200
 
 Any ordinary text message sent after processing a video is treated as a follow-up question about the active video.
 
+## Hosted transcript provider
+
+Cloud-server IPs are frequently blocked by YouTube. For reliable production use, the bot can use Supadata before falling back to self-hosted caption/proxy logic.
+
+```env
+SUPADATA_API_KEY=
+SUPADATA_MODE=native
+```
+
+`native` fetches existing captions only. `auto` falls back to provider-side AI transcription when captions are unavailable. Keep the API key only in the local `.env`.
+
+The self-hosted path also supports either a single `YOUTUBE_PROXY_URL` or a newline-separated rotating pool via `YOUTUBE_PROXY_FILE`.
+
 ## YouTube reliability
 
 YouTube may occasionally restrict requests from cloud-provider IP addresses. The normal setup does not require a proxy, but `YOUTUBE_PROXY_URL` is available if needed.

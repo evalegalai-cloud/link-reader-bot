@@ -15,6 +15,9 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Avoid leaking Telegram bot tokens embedded in HTTP request URLs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     settings = Settings.from_env()
     settings.validate()
 

@@ -46,13 +46,28 @@ class TelegramBot:
 
     def _authorized(self, update: Update) -> bool:
         user = update.effective_user
-        return bool(user and user.id in self.settings.allowed_user_ids)
+        if not user:
+            return False
+        if self.settings.allowed_user_ids:
+            return user.id in self.settings.allowed_user_ids
+        owner_id = self.service.db.get_bot_owner()
+        return owner_id is not None and user.id == owner_id
 
     async def _deny(self, update: Update):
         if update.effective_message:
             await update.effective_message.reply_text("אין הרשאה להשתמש בבוט הזה.")
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        chat = update.effective_chat
+        if not user or not chat:
+            return
+        if not self.settings.allowed_user_ids and self.service.db.get_bot_owner() is None:
+            if chat.type != "private":
+                return await self._deny(update)
+            if not self.service.db.claim_bot_owner(user.id):
+                return await self._deny(update)
+            logger.info("Telegram bot owner claimed on first private /start")
         if not self._authorized(update):
             return await self._deny(update)
         await update.effective_message.reply_text(

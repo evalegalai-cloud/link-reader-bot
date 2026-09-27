@@ -57,6 +57,11 @@ class Database:
             answer TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS bot_owner (
+            slot INTEGER PRIMARY KEY CHECK(slot = 1),
+            user_id INTEGER UNIQUE NOT NULL,
+            claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         """
         with self.connect() as conn:
             conn.executescript(schema)
@@ -155,3 +160,14 @@ class Database:
                 "SELECT id, title, source_type, created_at FROM content ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
+
+    def get_bot_owner(self) -> int | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT user_id FROM bot_owner WHERE slot=1").fetchone()
+        return int(row["user_id"]) if row else None
+
+    def claim_bot_owner(self, user_id: int) -> bool:
+        with self.connect() as conn:
+            conn.execute("INSERT OR IGNORE INTO bot_owner(slot, user_id) VALUES (1, ?)", (user_id,))
+            row = conn.execute("SELECT user_id FROM bot_owner WHERE slot=1").fetchone()
+        return bool(row and int(row["user_id"]) == int(user_id))

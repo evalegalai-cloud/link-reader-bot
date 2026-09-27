@@ -19,6 +19,9 @@ class Settings:
     asr_mode: str
     whisper_model: str
     youtube_proxy_url: str | None
+    youtube_proxy_file: str | None
+    supadata_api_key: str | None
+    supadata_mode: str
     max_video_minutes: int
     target_language: str
 
@@ -40,6 +43,9 @@ class Settings:
             asr_mode=os.getenv("ASR_MODE", "local").strip().lower(),
             whisper_model=os.getenv("WHISPER_MODEL", "small").strip(),
             youtube_proxy_url=os.getenv("YOUTUBE_PROXY_URL") or None,
+            youtube_proxy_file=os.getenv("YOUTUBE_PROXY_FILE") or None,
+            supadata_api_key=os.getenv("SUPADATA_API_KEY") or None,
+            supadata_mode=os.getenv("SUPADATA_MODE", "native").strip().lower(),
             max_video_minutes=int(os.getenv("MAX_VIDEO_MINUTES", "360")),
             target_language=os.getenv("TARGET_LANGUAGE", "Hebrew").strip() or "Hebrew",
         )
@@ -48,8 +54,6 @@ class Settings:
         missing = []
         if not self.telegram_bot_token:
             missing.append("TELEGRAM_BOT_TOKEN")
-        if not self.allowed_user_ids:
-            missing.append("TELEGRAM_ALLOWED_USER_IDS")
         if not self.llm_model_fast:
             missing.append("LLM_MODEL_FAST")
         if not self.llm_model_smart:
@@ -60,3 +64,5 @@ class Settings:
             raise RuntimeError("Missing required settings: " + ", ".join(missing))
         if self.llm_provider not in {"openai_compatible", "anthropic"}:
             raise RuntimeError("LLM_PROVIDER must be openai_compatible or anthropic")
+        if self.supadata_mode not in {"native", "auto", "generate"}:
+            raise RuntimeError("SUPADATA_MODE must be native, auto, or generate")
