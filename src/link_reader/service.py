@@ -64,7 +64,7 @@ class ContentService:
                 chunk["map_summary"] = await self.llm.complete(
                     MAP_SYSTEM + f"\nTarget output language: {self.target_language}.",
                     f"Excerpt {chunk['ordinal']}:\n\n{chunk['text']}",
-                    max_tokens=700,
+                    max_tokens=4000,
                     tier="fast",
                 )
                 return chunk
@@ -80,7 +80,7 @@ class ContentService:
         summary = await self.llm.complete(
             FINAL_SYSTEM + f"\nTarget output language: {self.target_language}.",
             f"Title: {item.title}\nCreator/channel: {item.author or 'Unknown'}\n\n{maps}",
-            max_tokens=2200,
+            max_tokens=5000,
             tier="smart",
         )
         self.db.set_summary(content_id, summary)
@@ -150,7 +150,7 @@ class ContentService:
             f"Previous Q&A context (only for resolving references):\n{history_text or 'None'}\n\n"
             f"Transcript excerpts:\n{evidence}"
         )
-        answer = await self.llm.complete(QA_SYSTEM + f"\nDefault answer language: {self.target_language}, unless the user explicitly asks for another language.", prompt, max_tokens=1800, tier="smart")
+        answer = await self.llm.complete(QA_SYSTEM + f"\nDefault answer language: {self.target_language}, unless the user explicitly asks for another language.", prompt, max_tokens=5000, tier="smart")
         self.db.save_qa(user_id, content["id"], question, answer)
         return answer
 
@@ -161,7 +161,7 @@ class ContentService:
         routing = await self.llm.complete(
             "Select up to 6 transcript chunks most relevant to the question. Return only chunk numbers separated by commas.",
             f"Question: {question}\n\nContent map:\n{index}",
-            max_tokens=80,
+            max_tokens=3500,
             tier="fast",
         )
         wanted = []
@@ -183,7 +183,7 @@ class ContentService:
         translated = []
         for chunk in chunks:
             translated.append(
-                await self.llm.complete(TRANSLATE_SYSTEM + f"\nTranslate into: {self.target_language}.", chunk["text"], max_tokens=5000, tier="fast")
+                await self.llm.complete(TRANSLATE_SYSTEM + f"\nTranslate into: {self.target_language}.", chunk["text"], max_tokens=9000, tier="fast")
             )
         safe_title = re.sub(r"[^\w\- ]+", "", content["title"], flags=re.UNICODE).strip()[:70]
         return (safe_title or "youtube") + "-translated.txt", "\n\n".join(translated)
