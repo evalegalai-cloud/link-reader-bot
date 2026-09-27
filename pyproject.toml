@@ -1,0 +1,30 @@
+[project]
+name = "link-reader-bot"
+version = "0.1.0"
+description = "Private Telegram bot for summarizing, translating and querying linked content"
+requires-python = ">=3.12"
+dependencies = [
+  "python-telegram-bot>=22.1,<23",
+  "youtube-transcript-api>=1.2,<2",
+  "yt-dlp>=2026.8.1",
+  "httpx>=0.28,<1",
+  "anthropic>=0.66,<1",
+  "python-dotenv>=1.1,<2",
+]
+
+[project.optional-dependencies]
+asr = ["faster-whisper>=1.2,<2"]
+dev = ["pytest>=8,<9", "pytest-asyncio>=1,<2"]
+
+[project.scripts]
+link-reader-bot = "link_reader.main:main"
+
+[build-system]
+requires = ["setuptools>=78"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
