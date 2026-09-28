@@ -157,10 +157,10 @@ Cloud-server IPs are frequently blocked by YouTube. The extraction order is deli
 
 ```env
 SUPADATA_API_KEY=
-SUPADATA_MODE=auto
+SUPADATA_MODE=native
 ```
 
-`native` fetches existing captions only. `auto` tries native captions first and falls back to provider-side AI transcription when needed. Keep the API key only in the local `.env`.
+`native` fetches existing captions only and is the recommended default. `auto` can generate a transcript when captions are missing, but generated transcripts consume credits per video minute. Keep the API key only in the local `.env`.
 
 Proxy use is optional. The bot supports either a single `YOUTUBE_PROXY_URL` or a newline-separated rotating pool via `YOUTUBE_PROXY_FILE`, but neither is required when the hosted transcript provider succeeds.
 
