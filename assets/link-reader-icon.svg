@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 800 800">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2776FF"/>
+      <stop offset="0.52" stop-color="#1150DD"/>
+      <stop offset="1" stop-color="#081F86"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#CFE0FF"/>
+      <stop offset="1" stop-color="#83A8F3"/>
+    </linearGradient>
+    <linearGradient id="chain" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D9E6FF"/>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="800" fill="#FFFFFF"/>
+  <circle cx="400" cy="400" r="355" fill="url(#bg)"/>
+
+  <!-- document -->
+  <path d="M292 168 H505 L603 266 V515 Q603 548 570 548 H292 Q259 548 259 515 V201 Q259 168 292 168 Z" fill="#FFFFFF"/>
+  <path d="M505 168 V236 Q505 266 535 266 H603 Z" fill="url(#fold)"/>
+  <rect x="330" y="292" width="135" height="29" rx="14.5" fill="#86A4E5"/>
+  <rect x="360" y="351" width="177" height="29" rx="14.5" fill="#86A4E5"/>
+  <rect x="401" y="410" width="136" height="29" rx="14.5" fill="#86A4E5"/>
+
+  <!-- interlocking chain -->
+  <g transform="translate(17 38) rotate(43 340 505)">
+    <rect x="195" y="430" width="260" height="132" rx="66" fill="none" stroke="#FFFFFF" stroke-width="48"/>
+    <rect x="345" y="510" width="260" height="132" rx="66" fill="none" stroke="url(#chain)" stroke-width="48"/>
+  </g>
+</svg>
