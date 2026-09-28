@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextvars
 
 import httpx
@@ -113,16 +114,39 @@ class LLMClient:
             "temperature": 0.2,
             "max_tokens": max_tokens,
         }
+        is_openrouter = bool(self.base_url and "openrouter.ai" in self.base_url)
+        if is_openrouter:
+            payload["provider"] = {
+                "sort": "latency" if max_tokens <= 128 else "throughput",
+                "allow_fallbacks": True,
+                "data_collection": "deny",
+                "require_parameters": True,
+            }
         if reasoning_effort == "none" and "deepseek" in model.lower():
-            if self.base_url and "openrouter.ai" in self.base_url:
+            if is_openrouter:
                 payload["reasoning"] = {"enabled": False}
             else:
                 payload["thinking"] = {"type": "disabled"}
             payload["reasoning_effort"] = "none"
-        async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
+
+        retryable_statuses = {408, 425, 429, 500, 502, 503, 504}
+        delays = (0.4, 1.2)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+            for attempt in range(3):
+                try:
+                    response = await client.post(url, headers=headers, json=payload)
+                    if response.status_code in retryable_statuses and attempt < 2:
+                        await asyncio.sleep(delays[attempt])
+                        continue
+                    response.raise_for_status()
+                    data = response.json()
+                    break
+                except (httpx.TimeoutException, httpx.NetworkError):
+                    if attempt >= 2:
+                        raise
+                    await asyncio.sleep(delays[attempt])
+            else:
+                raise RuntimeError("LLM request failed after retries")
         usage = data.get("usage") or {}
         self._record_usage(
             model,
