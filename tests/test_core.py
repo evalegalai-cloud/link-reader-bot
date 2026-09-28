@@ -143,3 +143,59 @@ def test_telegram_navigation_is_complete():
     assert "כתבה · Article" in recent
     assert "YouTube · Video" in recent
     assert "מקור נוכחי" in recent and "תפריט ראשי" in recent
+
+
+def test_whatsapp_signature_allowlist_and_stable_user_id():
+    import hashlib
+    import hmac
+    from link_reader.whatsapp import WhatsAppConfig, WhatsAppGateway
+
+    config = WhatsAppConfig(
+        access_token="token",
+        phone_number_id="123",
+        app_secret="secret",
+        verify_token="verify",
+        graph_version="v26.0",
+        allowed_numbers=frozenset({"15551234567"}),
+        admin_token="admin",
+    )
+    gateway = object.__new__(WhatsAppGateway)
+    gateway.config = config
+    body = b'{"object":"whatsapp_business_account"}'
+    sig = "sha256=" + hmac.new(b"secret", body, hashlib.sha256).hexdigest()
+    assert gateway.verify_signature(body, sig)
+    assert not gateway.verify_signature(body, "sha256=deadbeef")
+    assert config.sender_allowed("+1 555-123-4567")
+    assert not config.sender_allowed("15559876543")
+    assert gateway.user_id("15551234567") == gateway.user_id("15551234567")
+    assert gateway.user_id("15551234567") < 0
+
+
+def test_webhook_event_dedup(tmp_path):
+    from link_reader.db import Database
+    db = Database(str(tmp_path / "test.db"))
+    assert db.claim_webhook_event("whatsapp", "wamid.1")
+    assert not db.claim_webhook_event("whatsapp", "wamid.1")
+    assert db.claim_webhook_event("whatsapp", "wamid.2")
+
+
+def test_local_audio_prefers_openai_transcriber(tmp_path):
+    from types import SimpleNamespace
+    from link_reader.processors.audio import AudioProcessor
+    from link_reader.types import TranscriptSegment
+
+    settings = SimpleNamespace(asr_mode="local", whisper_model="small", max_video_minutes=360, supadata_api_key=None)
+    processor = AudioProcessor(settings)
+
+    class FakeTranscriber:
+        available = True
+        def transcribe(self, path, duration=None):
+            return [TranscriptSegment(0.0, 12.0, "hello world")], "en", 12.0
+
+    processor._openai_transcriber = FakeTranscriber()
+    path = tmp_path / "voice.ogg"
+    path.write_bytes(b"not-real-audio")
+    item = processor._extract_local_file_sync(path, "voice-1", "Voice", "voice", "telegram://voice/1")
+    assert item.extraction_method == "openai_gpt_transcribe"
+    assert item.source_type == "voice"
+    assert item.transcript_text == "[00:00] hello world"

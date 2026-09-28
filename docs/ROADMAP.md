@@ -36,6 +36,7 @@ Validation (2026-09-28):
 - EPUB — next
 
 ## Stage 5 — Podcasts / audio 🚧
+- Telegram voice notes + uploaded audio via `gpt-transcribe` ✅
 - Direct MP3/M4A/WAV/OGG/etc. ✅
 - Supadata transcription first; local faster-whisper fallback ✅
 - Timestamps, summary, Q&A, translation ✅
@@ -48,8 +49,12 @@ Validation (2026-09-28):
 - Reddit and text-only social posts — next
 - LinkedIn — access-dependent
 
-## Stage 7 — WhatsApp
-- WhatsApp Business / Cloud API adapter
+## Stage 7 — WhatsApp 🚧
+- Cloud API webhook + HTTPS endpoint ✅
+- Signature verification, event dedup, sender allowlist ✅
+- Text URLs / Q&A / recent-current commands ✅
+- Voice-note download + `gpt-transcribe` + Q&A/source ingestion ✅
+- Live Meta account activation — waiting only for credentials / phone-number setup
 
 ## Stage 8 — Knowledge library
 - Cross-content search and Q&A

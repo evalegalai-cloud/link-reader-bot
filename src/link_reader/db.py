@@ -62,6 +62,12 @@ class Database:
             user_id INTEGER UNIQUE NOT NULL,
             claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS webhook_events (
+            channel TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(channel, event_id)
+        );
         """
         with self.connect() as conn:
             conn.executescript(schema)
@@ -203,3 +209,11 @@ class Database:
             conn.execute("INSERT OR IGNORE INTO bot_owner(slot, user_id) VALUES (1, ?)", (user_id,))
             row = conn.execute("SELECT user_id FROM bot_owner WHERE slot=1").fetchone()
         return bool(row and int(row["user_id"]) == int(user_id))
+
+    def claim_webhook_event(self, channel: str, event_id: str) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO webhook_events(channel, event_id) VALUES (?, ?)",
+                (channel, event_id),
+            )
+            return cur.rowcount == 1

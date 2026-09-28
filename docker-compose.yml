@@ -8,3 +8,16 @@ services:
     volumes:
       - ./data:/data
       - ./downloads:/tmp/link-reader
+
+  whatsapp-webhook:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HF_HOME: /data/hf-cache
+    command: ["uvicorn", "link_reader.whatsapp:app", "--host", "0.0.0.0", "--port", "8767"]
+    ports:
+      - "127.0.0.1:8767:8767"
+    volumes:
+      - ./data:/data
+      - ./downloads:/tmp/link-reader

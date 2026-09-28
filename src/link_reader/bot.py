@@ -6,6 +6,8 @@ import io
 import logging
 import re
 import time
+import tempfile
+from pathlib import Path
 from collections import defaultdict
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -42,6 +44,7 @@ class TelegramBot:
         app.add_handler(CommandHandler("videos", self.videos))
         app.add_handler(CommandHandler("use", self.use_content))
         app.add_handler(CallbackQueryHandler(self.callback))
+        app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.Document.AUDIO, self.audio_message))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.message))
         app.add_error_handler(self.error_handler)
         return app
@@ -94,6 +97,89 @@ class TelegramBot:
         if match:
             return await self._handle_url(update, match.group(0), user_id)
         return await self._handle_question(update, text, user_id)
+
+    async def audio_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._authorized(update):
+            return await self._deny(update)
+        message = update.effective_message
+        user_id = update.effective_user.id
+        media = message.voice or message.audio or message.document
+        if media is None:
+            return
+
+        is_voice = message.voice is not None
+        duration = int(getattr(media, "duration", 0) or 0)
+        current = self.service.db.get_current_content(user_id)
+        as_question = bool(is_voice and current is not None and duration <= 120)
+        status = await message.reply_text("מקשיב…" if as_question else "מתמלל…")
+
+        suffix = ".ogg" if is_voice else Path(getattr(media, "file_name", "") or "audio.bin").suffix or ".bin"
+        tmp_path = None
+        try:
+            async with self._locks[user_id]:
+                with tempfile.NamedTemporaryFile(prefix="link-reader-voice-", suffix=suffix, delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+                telegram_file = await context.bot.get_file(media.file_id)
+                await telegram_file.download_to_drive(custom_path=str(tmp_path))
+
+                processor = next(
+                    (p for p in self.service.processors if p.__class__.__name__ == "AudioProcessor"),
+                    None,
+                )
+                if processor is None:
+                    raise RuntimeError("תמלול אודיו אינו זמין כרגע.")
+
+                source_type = "voice" if is_voice else "audio"
+                title = "הודעה קולית" if is_voice else (getattr(media, "file_name", None) or "קובץ אודיו")
+                item = await processor.extract_local_file(
+                    tmp_path,
+                    external_id=f"telegram-{media.file_unique_id}",
+                    title=title,
+                    source_type=source_type,
+                    url=f"telegram://{source_type}/{media.file_unique_id}",
+                )
+
+                if as_question:
+                    question = " ".join(seg.text.strip() for seg in item.segments if seg.text.strip())
+                    if not question:
+                        raise ValueError("לא הצלחתי להבין את ההודעה הקולית.")
+                    answer = await self.service.answer(user_id, question)
+                    await status.delete()
+                    return await self._send_long(
+                        message, answer, reply_markup=self._content_keyboard()
+                    )
+
+                started = time.monotonic()
+                content, cached = await self.service.ingest_item(item, user_id)
+                elapsed = time.monotonic() - started
+                prefix = "שמור\n\n" if cached else ""
+                footer = f"\n\n**זמן:** {self._format_duration(elapsed)}"
+                keys = set(content.keys())
+                cost = content["processing_cost_usd"] if "processing_cost_usd" in keys else None
+                if cost is not None:
+                    footer += f" · **עלות:** {self._format_cost(cost)}"
+                body = f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
+                chunks = self._split_text(body)
+                await status.edit_text(
+                    self._telegram_html(chunks[0]),
+                    parse_mode="HTML",
+                    reply_markup=self._content_keyboard() if len(chunks) == 1 else None,
+                )
+                for i, chunk in enumerate(chunks[1:], start=1):
+                    await message.reply_text(
+                        self._telegram_html(chunk),
+                        parse_mode="HTML",
+                        reply_markup=self._content_keyboard() if i == len(chunks) - 1 else None,
+                    )
+        except Exception as exc:
+            logger.exception("Failed processing Telegram audio")
+            await status.edit_text(
+                self._friendly_error(exc),
+                reply_markup=self._content_keyboard() if current else self._home_keyboard(),
+            )
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
     async def _handle_url(self, update: Update, url: str, user_id: int):
         async with self._locks[user_id]:
@@ -271,7 +357,7 @@ class TelegramBot:
         current = self.service.db.get_current_content(user_id)
         if current:
             return f"שלח קישור חדש, או המשך עם:\n{current['title']}"
-        return "שלח קישור כדי להתחיל."
+        return "שלח קישור או הודעה קולית כדי להתחיל."
 
     def _supported_text(self) -> str:
         return (
@@ -279,6 +365,7 @@ class TelegramBot:
             "• YouTube\n"
             "• כתבות ואתרים\n"
             "• PDF עם שכבת טקסט\n"
+            "• הודעות קוליות וקבצי אודיו\n"
             "• MP3 / M4A / WAV ועוד\n"
             "• TikTok / Instagram / Facebook ציבוריים\n"
             "• X עם וידאו — ניסיוני\n\n"
@@ -322,6 +409,7 @@ class TelegramBot:
             "web": "כתבה",
             "pdf": "PDF",
             "audio": "אודיו",
+            "voice": "קול",
             "social_video": "וידאו",
         }.get(source_type or "", "מקור")
 

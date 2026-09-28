@@ -13,6 +13,8 @@ dependencies = [
   "trafilatura>=2.2,<3",
   "pypdf>=6,<7",
   "fonttools>=4,<5",
+  "fastapi>=0.116,<1",
+  "uvicorn>=0.35,<1",
 ]
 
 [project.optional-dependencies]

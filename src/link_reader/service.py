@@ -4,6 +4,7 @@ import asyncio
 import re
 
 from link_reader.types import format_timestamp
+from link_reader.transcription import OPENAI_TRANSCRIBE_COST_PER_MINUTE
 
 
 MAP_SYSTEM = """Create a faithful content map from the transcript excerpt.
@@ -60,6 +61,15 @@ class ContentService:
             return cached, True
 
         item = await processor.extract(url)
+        return await self.ingest_item(item, user_id, cached=cached)
+
+    async def ingest_item(self, item, user_id: int, cached=None):
+        if cached is None:
+            cached = self.db.get_content_by_external_id(item.source_type, item.external_id)
+        if cached and cached["summary"]:
+            self.db.set_current_content(user_id, cached["id"])
+            return cached, True
+
         transcript = item.transcript_text
         if not transcript.strip():
             raise RuntimeError("לא התקבל טקסט מהמקור.")
@@ -70,14 +80,12 @@ class ContentService:
             content_id = self.db.save_content(item, transcript)
 
         chunks = self._chunk_segments(item.segments)
-        # Persist raw chunks immediately. Maps are generated only when a long
-        # source actually needs retrieval, instead of slowing every ingest.
         self.db.replace_chunks(content_id, chunks)
 
         usage_token, usage_tracker = self.llm.start_usage_tracking()
         try:
             if len(transcript) <= 80_000:
-                time_based = item.source_type in {"youtube", "audio", "social_video"}
+                time_based = item.source_type in {"youtube", "audio", "social_video", "voice"}
                 source_kind = "time-based transcript" if time_based else "section/page-marked document"
                 final_prompt = (
                     f"Title: {item.title}\nAuthor/creator: {item.author or 'Unknown'}"
@@ -122,7 +130,11 @@ class ContentService:
             transcript_credits = max(1.0, minutes * 2.0)
         else:
             transcript_credits = 0.0
-        transcript_cost = transcript_credits * 0.01
+        if item.extraction_method == "openai_gpt_transcribe":
+            minutes = max(0.0, float(item.duration_seconds or 0.0)) / 60.0
+            transcript_cost = minutes * OPENAI_TRANSCRIBE_COST_PER_MINUTE
+        else:
+            transcript_cost = transcript_credits * 0.01
         self.db.set_processing_stats(
             content_id,
             input_tokens=input_tokens,
@@ -395,5 +407,5 @@ class ContentService:
         if not content:
             raise ValueError("שלח קודם קישור.")
         safe_title = re.sub(r"[^\w\- ]+", "", content["title"], flags=re.UNICODE).strip()[:70]
-        suffix = "transcript" if content["source_type"] in {"youtube", "audio", "social_video"} else "source"
+        suffix = "transcript" if content["source_type"] in {"youtube", "audio", "social_video", "voice"} else "source"
         return (safe_title or "content") + f"-{suffix}.txt", content["transcript"]

@@ -50,7 +50,9 @@ The example configuration defaults to Hebrew. The practical language coverage de
 - Article section provenance using `[§N]` references.
 - Public text-PDF links with `[p.N]` page provenance.
 - Direct audio links (MP3/M4A/WAV/OGG/etc.) with timestamped transcription.
+- Telegram voice notes and uploaded audio; private files use OpenAI `gpt-transcribe`, with local faster-whisper fallback.
 - Public TikTok, Instagram, X, and Facebook video transcription through Supadata.
+- WhatsApp Cloud API gateway for links, text Q&A, and voice notes; activation requires your Meta credentials.
 - SSRF protection, redirect validation, size limits, and tracking-parameter normalization for web URLs.
 - Existing captions and auto-caption extraction.
 - Optional local Whisper fallback.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
@@ -12,9 +13,13 @@ import httpx
 from link_reader.processors.webpage import WebPageProcessor
 from link_reader.processors.supadata_media import fetch_media_transcript, supadata_key
 from link_reader.types import ExtractedContent, TranscriptSegment
+from link_reader.transcription import OpenAIFileTranscriber
 
 
-_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".opus", ".aac", ".flac", ".webm"}
+logger = logging.getLogger(__name__)
+
+
+_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".opus", ".aac", ".amr", ".flac", ".webm"}
 
 
 class AudioProcessor:
@@ -25,6 +30,7 @@ class AudioProcessor:
         self.settings = settings
         self._web_safety = WebPageProcessor(settings)
         self._model = None
+        self._openai_transcriber = OpenAIFileTranscriber()
 
     def supports(self, url: str) -> bool:
         try:
@@ -44,6 +50,46 @@ class AudioProcessor:
 
     async def extract(self, url: str) -> ExtractedContent:
         return await asyncio.to_thread(self._extract_sync, url)
+
+    async def extract_local_file(
+        self, path: str | Path, *, external_id: str, title: str,
+        source_type: str = "voice", url: str | None = None,
+    ) -> ExtractedContent:
+        return await asyncio.to_thread(
+            self._extract_local_file_sync,
+            Path(path), external_id, title, source_type, url,
+        )
+
+    def _extract_local_file_sync(
+        self, path: Path, external_id: str, title: str,
+        source_type: str, url: str | None,
+    ) -> ExtractedContent:
+        local_enabled = getattr(self.settings, "asr_mode", "off") == "local"
+        if not self._openai_transcriber.available and not local_enabled:
+            raise ValueError("תמלול אודיו אינו פעיל כרגע.")
+        method = "faster_whisper"
+        try:
+            if self._openai_transcriber.available:
+                duration = self._duration_seconds(path)
+                segments, language, duration = self._openai_transcriber.transcribe(path, duration)
+                method = "openai_gpt_transcribe"
+            else:
+                raise RuntimeError("OpenAI transcription unavailable")
+        except Exception:
+            if not local_enabled:
+                raise
+            segments, language, duration = self._transcribe_local_path(path)
+        return ExtractedContent(
+            external_id=external_id,
+            source_type=source_type,
+            url=url or f"local://{source_type}/{external_id}",
+            title=(title or "הודעה קולית")[:500],
+            author=None,
+            duration_seconds=duration,
+            language=language,
+            segments=segments,
+            extraction_method=method,
+        )
 
     def _extract_sync(self, url: str) -> ExtractedContent:
         if getattr(self.settings, "asr_mode", "off") != "local":
@@ -75,32 +121,7 @@ class AudioProcessor:
         suffix = Path(urlsplit(normalized).path).suffix.lower() or ".audio"
         final_url, path = self._download_audio(normalized, suffix)
         try:
-            duration = self._duration_seconds(path)
-            max_seconds = int(getattr(self.settings, "max_video_minutes", 360)) * 60
-            if duration and duration > max_seconds:
-                raise ValueError("קובץ האודיו ארוך מדי לעיבוד.")
-
-            model = self._whisper_model()
-            raw_segments, meta = model.transcribe(
-                str(path),
-                vad_filter=True,
-                beam_size=1,
-                condition_on_previous_text=True,
-            )
-            segments = [
-                TranscriptSegment(
-                    start=float(seg.start),
-                    duration=max(0.0, float(seg.end - seg.start)),
-                    text=seg.text.strip(),
-                )
-                for seg in raw_segments
-                if seg.text and seg.text.strip()
-            ]
-            if not segments:
-                raise ValueError("לא זוהה דיבור בקובץ האודיו.")
-            if not duration:
-                duration = max(seg.start + seg.duration for seg in segments)
-            language = getattr(meta, "language", None)
+            segments, language, duration = self._transcribe_local_path(path)
         finally:
             try:
                 path.unlink(missing_ok=True)
@@ -121,6 +142,35 @@ class AudioProcessor:
             segments=segments,
             extraction_method="faster_whisper",
         )
+
+    def _transcribe_local_path(self, path: Path):
+        duration = self._duration_seconds(path)
+        max_seconds = int(getattr(self.settings, "max_video_minutes", 360)) * 60
+        if duration and duration > max_seconds:
+            raise ValueError("קובץ האודיו ארוך מדי לעיבוד.")
+
+        model = self._whisper_model()
+        raw_segments, meta = model.transcribe(
+            str(path),
+            vad_filter=True,
+            beam_size=1,
+            condition_on_previous_text=True,
+        )
+        segments = [
+            TranscriptSegment(
+                start=float(seg.start),
+                duration=max(0.0, float(seg.end - seg.start)),
+                text=seg.text.strip(),
+            )
+            for seg in raw_segments
+            if seg.text and seg.text.strip()
+        ]
+        if not segments:
+            raise ValueError("לא זוהה דיבור בקובץ האודיו.")
+        if not duration:
+            duration = max(seg.start + seg.duration for seg in segments)
+        language = getattr(meta, "language", None)
+        return segments, language, duration
 
     def _whisper_model(self):
         if self._model is None:
