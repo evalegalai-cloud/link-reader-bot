@@ -238,12 +238,23 @@ class TelegramBot:
             ])
         return InlineKeyboardMarkup(buttons)
 
+    def _force_rtl_lines(self, text: str) -> str:
+        # Telegram chooses paragraph direction from the first strong character.
+        # Prefixing RLM keeps Hebrew paragraphs RTL even when they begin with
+        # an English/Latin name, number, timestamp, or punctuation.
+        rlm = "\u200f"
+        return "\n".join(
+            (rlm + line) if line.strip() else line
+            for line in text.split("\n")
+        )
+
     def _telegram_html(self, text: str) -> str:
+        text = self._force_rtl_lines(text)
         escaped = html.escape(text, quote=False)
-        escaped = re.sub(r"(?m)^\s*\*\s+", "• ", escaped)
+        escaped = re.sub(r"(?m)^\u200f\s*[-*]\s+", "\u200f• ", escaped)
         escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped, flags=re.DOTALL)
         escaped = re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"<i>\1</i>", escaped)
-        escaped = re.sub(r"(?m)^#{1,6}\s+", "", escaped)
+        escaped = re.sub(r"(?m)^\u200f#{1,6}\s+", "\u200f", escaped)
         escaped = escaped.replace("*", "")
         return escaped
 

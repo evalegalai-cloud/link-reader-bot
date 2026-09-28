@@ -17,6 +17,7 @@ Clearly distinguish the speaker's claims, opinions, and predictions from establi
 Structure the answer as: one-line takeaway, 4–6 key points, and a 5–7-bullet timestamped timeline.
 Cover the video from beginning to end. Avoid repetition and keep the whole answer concise, roughly 300–450 Hebrew words unless the source genuinely requires more.
 When writing in Hebrew, on the first meaningful occurrence of an important foreign proper name, technical term, title, Latin/Greek expression, or term whose original spelling matters, include the original-language form in parentheses after the Hebrew form. Do this selectively, not for ordinary words.
+When the output is Hebrew, begin each paragraph and bullet with Hebrew wording whenever possible. Do not begin a Hebrew paragraph or bullet with an English/Latin term; introduce it in Hebrew and put the original form in parentheses.
 Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold.
 Finish the response with the exact marker [[END_OF_SUMMARY]] on a line by itself."""
 QA_SYSTEM = """Answer only from the supplied transcript excerpts.
@@ -29,7 +30,8 @@ TRANSLATE_SYSTEM = """Translate every supplied segment completely and faithfully
 Do not summarize, shorten, merge, skip, or reorder segments.
 Each input segment starts with an internal ID like [S000001]. Preserve every ID exactly once and in the same order.
 Do not add timestamps.
-When translating into Hebrew, preserve important foreign proper names, technical terms, titles, and Latin/Greek expressions in their original-language form in parentheses where useful."""
+When translating into Hebrew, preserve important foreign proper names, technical terms, titles, and Latin/Greek expressions in their original-language form in parentheses where useful.
+When translating into Hebrew, begin each paragraph or line with Hebrew wording whenever possible rather than an English/Latin term."""
 
 
 class ContentService:
@@ -324,6 +326,8 @@ class ContentService:
 
         translated = await asyncio.gather(*(translate_units(part) for part in parts))
         text = "\n\n".join(translated)
+        rlm = "\u200f"
+        text = "\n".join((rlm + line) if line.strip() else line for line in text.split("\n"))
         safe_title = re.sub(r"[^\w\- ]+", "", content["title"], flags=re.UNICODE).strip()[:70]
         return (safe_title or "youtube") + "-translated.txt", text
 
