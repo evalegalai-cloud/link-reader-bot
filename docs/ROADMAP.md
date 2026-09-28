@@ -1,74 +1,50 @@
-# Roadmap
+# Link Reader Roadmap
 
-The project is designed around a reusable content-processing pipeline rather than a YouTube-specific monolith.
+## Stage 1 — YouTube V1 ✅
+- Supadata transcript ingestion
+- Fast OpenRouter / DeepSeek summarization
+- Full translation without timestamps
+- Grounded Q&A with short per-video conversational memory
+- Hebrew RTL handling
+- Simple Telegram UX and cost/time display
+- Production validation on uncached videos
 
-## Phase 1 — YouTube
+Validation (2026-09-28):
+- TED 2026 (~16m): ingest 14.67s; full translation 17.12s; initial API-equivalent cost ~$0.01277.
+- TED 2024 (~22m): ingest 10.19s; Q&A 4.25s / follow-up 3.82s; initial API-equivalent cost ~$0.01332.
 
-Implemented:
+## Stage 2 — Reliability & routing
+- OpenRouter provider routing benchmark
+- Retries for 429/5xx/network errors
+- Provider failover
+- Bounded timeouts and concise user-facing errors
+- Preserve provider-reported cost
 
-- caption and auto-caption extraction
-- local Whisper fallback
-- timestamped transcript storage
-- long-video chunking
-- content-map generation
-- structured summaries
-- grounded follow-up Q&A
-- full translation export
-- transcript export
-- caching and recent-content history
-- configurable target language
+## Stage 3 — Web / Articles
+- Generic URL classifier + processor registry
+- Main-article extraction
+- Metadata / canonical URL / headings
+- Summary, Q&A, full translation
+- Browser fallback only when normal HTTP extraction fails
 
-## Phase 2 — Generic web content
+## Stage 4 — PDFs / books
+- PDF text + page provenance
+- OCR only for scanned pages
+- EPUB later
 
-Add processors for:
+## Stage 5 — Podcasts / audio
+- RSS/direct audio
+- ASR + timestamps
+- Q&A / translation
+- Diarization later
 
-- normal web pages
-- long-form articles
-- public blog posts
-- PDFs
-- uploaded books and documents
-- podcast and audio URLs
+## Stage 6 — Social sources
+- Reddit / X first
+- LinkedIn / TikTok / Instagram / Facebook as access permits
 
-Each processor should return the same normalized content contract so the existing summary, translation, storage, and Q&A layers can be reused.
+## Stage 7 — WhatsApp
+- WhatsApp Business / Cloud API adapter
 
-## Phase 3 — Social links
-
-Add dedicated adapters where technically and legally practical for:
-
-- X / Twitter
-- Reddit
-- LinkedIn
-- TikTok
-- Instagram
-- Facebook
-
-Prefer official APIs or reliably accessible public content. Avoid brittle scraping when a supported access path exists.
-
-## Phase 4 — Messaging surfaces
-
-Keep Telegram as the reference client and add other thin front ends over the same backend, especially:
-
-- WhatsApp
-- a lightweight web UI
-- browser share-sheet / extension workflows
-
-## Phase 5 — Personal knowledge library
-
-Optional additions:
-
-- tags and folders
-- saved collections
-- cross-content search
-- ask questions across multiple saved sources
-- Drive export
-- hybrid/vector retrieval when the corpus becomes large enough to justify it
-
-## Language strategy
-
-The core should remain language-agnostic:
-
-- source language is determined by captions or ASR
-- output language is configured independently
-- prompts should remain in a neutral internal language
-- user-facing output should follow `TARGET_LANGUAGE`
-- language-specific logic should stay outside the retrieval and storage layers
+## Stage 8 — Knowledge library
+- Cross-content search and Q&A
+- SQLite FTS first; vector DB only if justified
