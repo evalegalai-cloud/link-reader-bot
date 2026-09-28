@@ -21,6 +21,7 @@ When the output is Hebrew, begin each paragraph and bullet with Hebrew wording w
 Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold.
 Finish the response with the exact marker [[END_OF_SUMMARY]] on a line by itself."""
 QA_SYSTEM = """Answer only from the supplied transcript excerpts.
+Use recent conversation only to understand what the user is referring to; factual claims must still be supported by the transcript excerpts.
 Do not use outside knowledge unless the user explicitly asks for it.
 When possible, cite the exact timestamp as [MM:SS] or [HH:MM:SS].
 If the excerpts do not support an answer, say so clearly instead of guessing.
@@ -219,24 +220,21 @@ class ContentService:
         if not chunks:
             raise RuntimeError("לא נמצאו מקטעים שמורים לסרטון.")
 
+        history = self.db.get_recent_qa(user_id, content["id"], limit=6)
+        history_text = self._conversation_context(history)
+
         total_chars = sum(len(c["text"]) for c in chunks)
         if total_chars <= 55_000:
             selected = list(chunks)
         else:
-            selected = await self._select_chunks(question, chunks)
-
-        history = self.db.get_recent_qa(user_id, content["id"], limit=4)
-        history_text = "\n".join(
-            f"Previous question: {row['question']}\nPrevious answer: {row['answer'][:1200]}"
-            for row in history
-        )
+            selected = await self._select_chunks(question, chunks, history_text)
         evidence = "\n\n".join(
             f"--- Chunk {c['ordinal']} ---\n{c['text']}" for c in selected
         )
         prompt = (
             f"Video title: {content['title']}\n"
             f"Question: {question}\n\n"
-            f"Previous Q&A context (only for resolving references):\n{history_text or 'None'}\n\n"
+            f"Recent conversation about this video (use it to resolve follow-ups and references):\n{history_text or 'None'}\n\n"
             f"Transcript excerpts:\n{evidence}"
         )
         lower = question.lower()
@@ -254,15 +252,29 @@ class ContentService:
         self.db.save_qa(user_id, content["id"], question, answer)
         return answer
 
-    async def _select_chunks(self, question: str, chunks):
+    def _conversation_context(self, history, max_chars: int = 5000) -> str:
+        if not history:
+            return ""
+        blocks = []
+        for row in history:
+            question = (row["question"] or "").strip()
+            answer = (row["answer"] or "").strip()[:1000]
+            blocks.append(f"User: {question}\nAssistant: {answer}")
+        text = "\n\n".join(blocks)
+        return text[-max_chars:]
+
+    async def _select_chunks(self, question: str, chunks, history_text: str = ""):
         if any(not (c["map_summary"] or "").strip() for c in chunks):
             chunks = await self._ensure_maps(chunks[0]["content_id"], chunks)
         index = "\n\n".join(
             f"Chunk {c['ordinal']}: {c['map_summary'] or ''}" for c in chunks
         )
         routing = await self.llm.complete(
-            "Select up to 6 transcript chunks most relevant to the question. Return only chunk numbers separated by commas.",
-            f"Question: {question}\n\nContent map:\n{index}",
+            "Select up to 6 transcript chunks relevant to the current question. "
+            "Use the recent conversation only to resolve pronouns, ellipsis, and follow-up references. "
+            "Return only chunk numbers separated by commas.",
+            f"Recent conversation:\n{history_text or 'None'}\n\n"
+            f"Current question: {question}\n\nContent map:\n{index}",
             max_tokens=64,
             tier="fast",
             reasoning_effort="none",
