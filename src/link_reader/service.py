@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 
-from link_reader.types import format_timestamp
+from link_reader.types import ExtractedContent, TranscriptSegment, format_timestamp
 from link_reader.transcription import OPENAI_TRANSCRIBE_COST_PER_MINUTE
 
 
@@ -12,7 +13,7 @@ Use only the transcript. Do not add external knowledge or guess.
 Write 3–8 concise points and preserve useful source references (timestamps, section markers, or page markers) from the source.
 When the target output is Hebrew, preserve important foreign proper names, technical terms, titles, Latin/Greek expressions, and other terms whose original spelling matters by including the original-language form in parentheses on first meaningful occurrence.
 Finish with the exact marker [[END_OF_MAP]] on a line by itself."""
-FINAL_SYSTEM = """Summarize the video faithfully from the supplied source.
+FINAL_SYSTEM = """Summarize the supplied source faithfully.
 Do not add facts that are not present in the source.
 Clearly distinguish the speaker's claims, opinions, and predictions from established facts.
 Structure the answer as: one-line takeaway, 4–6 key points, and 5–7 short source-reference bullets. For time-based media use timestamps; for articles/documents use section or page markers instead.
@@ -21,8 +22,8 @@ When writing in Hebrew, on the first meaningful occurrence of an important forei
 When the output is Hebrew, begin each paragraph and bullet with Hebrew wording whenever possible. Do not begin a Hebrew paragraph or bullet with an English/Latin term; introduce it in Hebrew and put the original form in parentheses.
 Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold.
 Finish the response with the exact marker [[END_OF_SUMMARY]] on a line by itself."""
-QA_SYSTEM = """Answer only from the supplied transcript excerpts.
-Use recent conversation only to understand what the user is referring to; factual claims must still be supported by the transcript excerpts.
+QA_SYSTEM = """Answer only from the supplied excerpts from the current source.
+Use recent conversation only to understand what the user is referring to; factual claims must still be supported by the supplied source excerpts.
 Do not use outside knowledge unless the user explicitly asks for it.
 When possible, cite the exact source reference: a timestamp such as [MM:SS], an article section such as [§12], or a page marker such as [p.4].
 If the excerpts do not support an answer, say so clearly instead of guessing.
@@ -68,6 +69,108 @@ class ContentService:
             if processor.supports(url):
                 return processor
         return None
+
+    def looks_like_pasted_source(self, text: str) -> bool:
+        value = (text or "").strip()
+        if len(value) < 350:
+            return False
+        lowered = value.casefold()
+        explicit_question_prefixes = (
+            "שאלה:", "שאלה -", "אני רוצה לשאול", "תסביר לי", "ענה לי",
+            "בדוק באינטרנט", "חפש באינטרנט", "חפש ברשת", "שאל הכל",
+            "question:", "please explain", "search the web", "ask all",
+        )
+        if lowered.startswith(explicit_question_prefixes):
+            return False
+        if len(value) >= 1200:
+            return True
+
+        conversational_prefixes = (
+            "מה ", "למה ", "איך ", "האם ", "מתי ", "איפה ", "מי ",
+            "תוכל ", "אפשר ", "אני רוצה לדעת", "בדוק ", "השווה ",
+            "explain ", "what ", "why ", "how ", "can you ", "could you ",
+        )
+        if lowered.startswith(conversational_prefixes):
+            return False
+
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", value) if p.strip()]
+        sentences = len(re.findall(r"[.!?。！？]\s|[.!?。！？]$", value))
+        urls = len(re.findall(r"https?://\S+", value))
+        return len(paragraphs) >= 3 or sentences >= 5 or (urls >= 1 and len(value) >= 500)
+
+    def _pasted_text_item(self, text: str) -> ExtractedContent:
+        value = (text or "").strip()
+        if not value:
+            raise ValueError("לא התקבל טקסט.")
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+        urls = re.findall(r"https?://\S+", value)
+        source_url = urls[0].rstrip(".,)>]") if urls else f"text://{digest}"
+
+        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        title = "טקסט שהודבק"
+        if lines:
+            first = re.sub(r"^#+\s*", "", lines[0]).strip()
+            if 4 <= len(first) <= 180 and not first.startswith(("http://", "https://")):
+                title = first
+
+        paragraphs = [
+            p.strip()
+            for p in re.split(r"\n\s*\n", value)
+            if p.strip()
+        ]
+        if len(paragraphs) <= 1:
+            paragraphs = [
+                p.strip()
+                for p in re.split(r"(?<=[.!?。！？])\s+", value)
+                if p.strip()
+            ]
+        if not paragraphs:
+            paragraphs = [value]
+
+        segments = []
+        buffer = []
+        chars = 0
+        section = 1
+        for paragraph in paragraphs:
+            if buffer and chars + len(paragraph) > 3000:
+                segments.append(
+                    TranscriptSegment(
+                        start=float(section - 1),
+                        duration=1.0,
+                        text="\n\n".join(buffer),
+                        reference=f"§{section}",
+                    )
+                )
+                section += 1
+                buffer = []
+                chars = 0
+            buffer.append(paragraph)
+            chars += len(paragraph) + 2
+        if buffer:
+            segments.append(
+                TranscriptSegment(
+                    start=float(section - 1),
+                    duration=1.0,
+                    text="\n\n".join(buffer),
+                    reference=f"§{section}",
+                )
+            )
+
+        return ExtractedContent(
+            external_id=digest,
+            source_type="text",
+            url=source_url,
+            title=title[:500],
+            author=None,
+            duration_seconds=None,
+            language=None,
+            segments=segments,
+            extraction_method="pasted_text",
+        )
+
+    async def ingest_text(self, text: str, user_id: int):
+        item = self._pasted_text_item(text)
+        return await self.ingest_item(item, user_id)
 
     async def ingest(self, url: str, user_id: int):
         processor = self.processor_for(url)
@@ -430,10 +533,10 @@ class ContentService:
             f"--- Chunk {c['ordinal']} ---\n{c['text']}" for c in selected
         )
         prompt = (
-            f"Video title: {content['title']}\n"
+            f"Source title: {content['title']}\n"
             f"Question: {question}\n\n"
-            f"Recent conversation about this video (use it to resolve follow-ups and references):\n{history_text or 'None'}\n\n"
-            f"Transcript excerpts:\n{evidence}"
+            f"Recent conversation about this source (use it to resolve follow-ups and references):\n{history_text or 'None'}\n\n"
+            f"Source excerpts:\n{evidence}"
         )
         lower = question.lower()
         detailed = any(x in lower for x in ("מפורט", "בהרחבה", "לעומק", "detailed", "comprehensive"))

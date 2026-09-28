@@ -120,6 +120,12 @@ class TelegramBot:
                 "כתוב או הקלט עכשיו שאלה; אשתמש גם באינטרנט ואפריד מידע חיצוני מהמקור."
             )
 
+        # A pasted article/translation/document is a new source, not a question
+        # about whatever source happened to be active before it.
+        if self.service.looks_like_pasted_source(text):
+            context.user_data.pop("next_mode", None)
+            return await self._handle_pasted_text(update, text, user_id)
+
         forced_mode = context.user_data.pop("next_mode", None)
         if forced_mode:
             return await self._handle_question(update, text, user_id, force_mode=forced_mode)
@@ -220,6 +226,42 @@ class TelegramBot:
         finally:
             if tmp_path is not None:
                 tmp_path.unlink(missing_ok=True)
+
+    async def _handle_pasted_text(self, update: Update, text: str, user_id: int):
+        async with self._locks[user_id]:
+            started = time.monotonic()
+            status = await update.effective_message.reply_text("שומר ומסכם את הטקסט…")
+            try:
+                content, cached = await self.service.ingest_text(text, user_id)
+                elapsed = time.monotonic() - started
+                prefix = "שמור\n\n" if cached else ""
+                footer = f"\n\n**זמן:** {self._format_duration(elapsed)}"
+                keys = set(content.keys())
+                cost = content["processing_cost_usd"] if "processing_cost_usd" in keys else None
+                if cost is not None:
+                    footer += f" · **עלות:** {self._format_cost(cost)}"
+                body = (
+                    f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
+                    "\n\nהטקסט נשמר כמקור הנוכחי. אפשר פשוט לשאול עליו."
+                )
+                chunks = self._split_text(body)
+                await status.edit_text(
+                    self._telegram_html(chunks[0]),
+                    parse_mode="HTML",
+                    reply_markup=self._content_keyboard() if len(chunks) == 1 else None,
+                )
+                for i, chunk in enumerate(chunks[1:], start=1):
+                    await update.effective_message.reply_text(
+                        self._telegram_html(chunk),
+                        parse_mode="HTML",
+                        reply_markup=self._content_keyboard() if i == len(chunks) - 1 else None,
+                    )
+            except Exception as exc:
+                logger.exception("Failed processing pasted text")
+                await status.edit_text(
+                    f"לא הצלחתי לעבד את הטקסט: {self._friendly_error(exc)}",
+                    reply_markup=self._home_keyboard(),
+                )
 
     async def _handle_url(self, update: Update, url: str, user_id: int):
         async with self._locks[user_id]:
@@ -500,6 +542,7 @@ class TelegramBot:
             "youtube": "YouTube",
             "web": "כתבה",
             "pdf": "PDF",
+            "text": "טקסט",
             "epub": "EPUB",
             "podcast": "פודקאסט",
             "reddit": "Reddit",

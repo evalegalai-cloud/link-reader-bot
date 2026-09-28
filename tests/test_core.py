@@ -398,3 +398,30 @@ def test_freeform_router_keeps_source_default_and_menu_persistent():
     assert menu.is_persistent is True
     assert "🌐 אינטרנט" in labels
     assert "🔎 כל המקורות" in labels
+
+
+def test_pasted_article_becomes_new_text_source():
+    from link_reader.service import ContentService
+
+    class StubDB:
+        def get_current_content(self, user_id):
+            return {"id": 99, "title": "old source"}
+
+    service = ContentService(StubDB(), None, [])
+    article = (
+        "כותרת הכתבה\n\n"
+        + ("זוהי פסקה ארוכה של כתבה מתורגמת עם מידע ותוכן ענייני. " * 12)
+        + "\n\n"
+        + ("פסקה נוספת שממשיכה את הכתבה ומוסיפה פרטים והסברים. " * 10)
+        + "\n\nhttps://example.com/original"
+    )
+    assert service.looks_like_pasted_source(article) is True
+    item = service._pasted_text_item(article)
+    assert item.source_type == "text"
+    assert item.title == "כותרת הכתבה"
+    assert item.url == "https://example.com/original"
+    assert item.segments
+    assert item.segments[0].reference == "§1"
+
+    long_question = "שאלה: " + ("תסביר לי לעומק את הטענה הזאת ואת ההקשר שלה. " * 40)
+    assert service.looks_like_pasted_source(long_question) is False

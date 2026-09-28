@@ -214,6 +214,21 @@ class WhatsAppGateway:
         if not text:
             return
         lowered = text.casefold()
+        if self.service.looks_like_pasted_source(text):
+            started = time.monotonic()
+            content, cached = await self.service.ingest_text(text, user_id)
+            elapsed = time.monotonic() - started
+            prefix = "שמור\n\n" if cached else ""
+            footer = f"\n\nזמן: {self._duration(elapsed)}"
+            cost = content["processing_cost_usd"]
+            if cost is not None:
+                footer += f" · עלות: {self._cost(cost)}"
+            return await self.send_text(
+                sender,
+                f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
+                "\n\nהטקסט נשמר כמקור הנוכחי. אפשר פשוט לשאול עליו.",
+            )
+
         library_question = re.match(r"^(?:שאל\s+הכל|askall)\s+(.+)$", text, re.IGNORECASE)
         if library_question:
             answer = await self.service.answer_library(library_question.group(1).strip())
