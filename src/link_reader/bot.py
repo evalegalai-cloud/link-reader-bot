@@ -95,8 +95,8 @@ class TelegramBot:
         async with self._locks[user_id]:
             started = time.monotonic()
             status = await update.effective_message.reply_text(
-                "קיבלתי. אני מחלץ את התמלול ומכין מפת תוכן וסיכום בעברית. "
-                "בסיום אציג גם את זמן העיבוד."
+                "קיבלתי. בסרטון חדש העיבוד בדרך כלל לוקח בערך 1–3 דקות, "
+                "בהתאם לאורך הסרטון. בסיום אציג גם את זמן העיבוד המדויק."
             )
             try:
                 content, cached = await self.service.ingest(url, user_id)
@@ -219,27 +219,33 @@ class TelegramBot:
 
     def _split_text(self, text: str, limit: int = 3500) -> list[str]:
         remaining = text.strip()
-        chunks = []
+        raw_chunks = []
         while remaining:
             if len(remaining) <= limit:
-                chunks.append(remaining)
+                raw_chunks.append(remaining)
                 break
             cut = remaining.rfind("\n", 0, limit)
             if cut < 1000:
                 cut = remaining.rfind(" ", 0, limit)
             if cut < 1000:
                 cut = limit
-
-            # Do not split inside a **bold** span. If the tentative chunk has
-            # an unmatched opening marker, move the boundary before it.
-            prefix = remaining[:cut]
-            if prefix.count("**") % 2:
-                opening = prefix.rfind("**")
-                if opening >= 1000:
-                    cut = opening
-
-            chunks.append(remaining[:cut].rstrip())
+            raw_chunks.append(remaining[:cut].rstrip())
             remaining = remaining[cut:].lstrip()
+
+        # Preserve **bold** across Telegram message boundaries by closing and
+        # reopening the span around each chunk when a split occurs inside it.
+        chunks = []
+        bold_open = False
+        for chunk in raw_chunks:
+            starts_inside_bold = bold_open
+            if chunk.count("**") % 2:
+                bold_open = not bold_open
+            rendered = chunk
+            if starts_inside_bold:
+                rendered = "**" + rendered
+            if bold_open:
+                rendered = rendered + "**"
+            chunks.append(rendered)
         return chunks
 
     def _format_duration(self, seconds: float) -> str:
