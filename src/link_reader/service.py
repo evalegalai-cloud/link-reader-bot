@@ -14,8 +14,8 @@ Finish with the exact marker [[END_OF_MAP]] on a line by itself."""
 FINAL_SYSTEM = """Summarize the video faithfully from the supplied source.
 Do not add facts that are not present in the source.
 Clearly distinguish the speaker's claims, opinions, and predictions from established facts.
-Structure the answer as: one-line takeaway, 6–8 comprehensive key points, and an 8–10-bullet timestamped timeline.
-Cover the video from beginning to end, not only the final section. Avoid repetition and keep the whole answer concise, roughly 500–700 Hebrew words unless the source genuinely requires more.
+Structure the answer as: one-line takeaway, 4–6 key points, and a 5–7-bullet timestamped timeline.
+Cover the video from beginning to end. Avoid repetition and keep the whole answer concise, roughly 300–450 Hebrew words unless the source genuinely requires more.
 When writing in Hebrew, on the first meaningful occurrence of an important foreign proper name, technical term, title, Latin/Greek expression, or term whose original spelling matters, include the original-language form in parentheses after the Hebrew form. Do this selectively, not for ordinary words.
 Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold.
 Finish the response with the exact marker [[END_OF_SUMMARY]] on a line by itself."""
@@ -98,7 +98,7 @@ class ContentService:
 
             summary = await self._complete_checked(
                 final_system, final_prompt, "[[END_OF_SUMMARY]]",
-                first_budget=3200, retry_budget=4800, tier="smart",
+                first_budget=2400, retry_budget=3600, tier="smart",
                 label="סיכום",
             )
             self.db.set_summary(content_id, summary)

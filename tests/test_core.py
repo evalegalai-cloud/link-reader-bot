@@ -39,7 +39,7 @@ def test_telegram_rendering_and_long_split():
 
     bot = TelegramBot(SimpleNamespace(), SimpleNamespace())
     text = ("**כותרת:** מונח (Corpus Paulinum). *הערה*. [12:34]\n" * 100)
-    text += "\n**זמן עיבוד:** דקה אחת ו־41 שניות"
+    text += "\n**זמן:** 1:41 דק׳ · **עלות:** כ-23.54 סנט"
     chunks = bot._split_text(text)
     assert len(chunks) > 1
     assert max(len(chunk) for chunk in chunks) <= 3500
@@ -47,5 +47,7 @@ def test_telegram_rendering_and_long_split():
     rendered = [bot._telegram_html(chunk) for chunk in chunks]
     assert all("*" not in chunk for chunk in rendered)
     assert sum(chunk.count("<b>") for chunk in rendered) == sum(chunk.count("</b>") for chunk in rendered)
-    assert any("זמן עיבוד" in chunk for chunk in rendered)
-    assert bot._format_duration(61) == "דקה אחת ו־שנייה אחת"
+    assert any("זמן" in chunk for chunk in rendered)
+    assert bot._format_duration(61) == "1:01 דק׳"
+    assert bot._format_cost(0.2354) == "כ-23.54 סנט"
+    assert bot._format_cost(23.45) == "כ-23.45 דולר"
