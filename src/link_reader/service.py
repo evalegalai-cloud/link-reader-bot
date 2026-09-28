@@ -8,14 +8,14 @@ from link_reader.types import format_timestamp
 
 MAP_SYSTEM = """Create a faithful content map from the transcript excerpt.
 Use only the transcript. Do not add external knowledge or guess.
-Write 3–8 concise points and preserve useful timestamps from the source.
+Write 3–8 concise points and preserve useful source references (timestamps, section markers, or page markers) from the source.
 When the target output is Hebrew, preserve important foreign proper names, technical terms, titles, Latin/Greek expressions, and other terms whose original spelling matters by including the original-language form in parentheses on first meaningful occurrence.
 Finish with the exact marker [[END_OF_MAP]] on a line by itself."""
 FINAL_SYSTEM = """Summarize the video faithfully from the supplied source.
 Do not add facts that are not present in the source.
 Clearly distinguish the speaker's claims, opinions, and predictions from established facts.
-Structure the answer as: one-line takeaway, 4–6 key points, and a 5–7-bullet timestamped timeline.
-Cover the video from beginning to end. Avoid repetition and keep the whole answer concise, roughly 300–450 Hebrew words unless the source genuinely requires more.
+Structure the answer as: one-line takeaway, 4–6 key points, and 5–7 short source-reference bullets. For time-based media use timestamps; for articles/documents use section or page markers instead.
+Cover the source from beginning to end. Avoid repetition and keep the whole answer concise, roughly 300–450 Hebrew words unless the source genuinely requires more.
 When writing in Hebrew, on the first meaningful occurrence of an important foreign proper name, technical term, title, Latin/Greek expression, or term whose original spelling matters, include the original-language form in parentheses after the Hebrew form. Do this selectively, not for ordinary words.
 When the output is Hebrew, begin each paragraph and bullet with Hebrew wording whenever possible. Do not begin a Hebrew paragraph or bullet with an English/Latin term; introduce it in Hebrew and put the original form in parentheses.
 Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold.
@@ -23,7 +23,7 @@ Finish the response with the exact marker [[END_OF_SUMMARY]] on a line by itself
 QA_SYSTEM = """Answer only from the supplied transcript excerpts.
 Use recent conversation only to understand what the user is referring to; factual claims must still be supported by the transcript excerpts.
 Do not use outside knowledge unless the user explicitly asks for it.
-When possible, cite the exact timestamp as [MM:SS] or [HH:MM:SS].
+When possible, cite the exact source reference: a timestamp such as [MM:SS], an article section such as [§12], or a page marker such as [p.4].
 If the excerpts do not support an answer, say so clearly instead of guessing.
 When answering in Hebrew, on the first meaningful occurrence of an important foreign proper name, technical term, title, Latin/Greek expression, or term whose original spelling matters, include the original-language form in parentheses after the Hebrew form. Do this selectively, not for ordinary words.
 Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold."""
@@ -51,7 +51,7 @@ class ContentService:
     async def ingest(self, url: str, user_id: int):
         processor = self.processor_for(url)
         if processor is None:
-            raise ValueError("כרגע הבוט תומך בקישורי YouTube בלבד.")
+            raise ValueError("הקישור הזה עדיין לא נתמך.")
 
         external_id = processor.external_id(url)
         cached = self.db.get_content_by_external_id(processor.source_type, external_id)
@@ -62,7 +62,7 @@ class ContentService:
         item = await processor.extract(url)
         transcript = item.transcript_text
         if not transcript.strip():
-            raise RuntimeError("לא התקבל תמלול מהסרטון.")
+            raise RuntimeError("לא התקבל טקסט מהמקור.")
 
         if cached:
             content_id = cached["id"]
@@ -77,26 +77,27 @@ class ContentService:
         usage_token, usage_tracker = self.llm.start_usage_tracking()
         try:
             if len(transcript) <= 80_000:
+                source_kind = "time-based transcript" if item.source_type == "youtube" else "section-marked document"
                 final_prompt = (
-                    f"Title: {item.title}\nCreator/channel: {item.author or 'Unknown'}"
-                    f"\n\nFull timestamped transcript:\n{transcript}"
+                    f"Title: {item.title}\nAuthor/creator: {item.author or 'Unknown'}"
+                    f"\nSource type: {item.source_type}\n\nFull source text:\n{transcript}"
                 )
                 final_system = (
                     FINAL_SYSTEM
                     + f"\nTarget output language: {self.target_language}."
-                    + "\nThe supplied source is the full timestamped transcript."
+                    + f"\nThe supplied source is the full {source_kind}. Preserve its reference style."
                 )
             else:
                 mapped = await self._ensure_maps(content_id, self.db.get_chunks(content_id))
                 maps = self._maps_text(mapped)
                 final_prompt = (
-                    f"Title: {item.title}\nCreator/channel: {item.author or 'Unknown'}"
+                    f"Title: {item.title}\nAuthor/creator: {item.author or 'Unknown'}"
                     f"\n\nComplete content map:\n{maps}"
                 )
                 final_system = (
                     FINAL_SYSTEM
                     + f"\nTarget output language: {self.target_language}."
-                    + "\nThe supplied source is a complete timestamped content map covering the full transcript."
+                    + "\nThe supplied source is a complete content map covering the full source. Preserve its reference style."
                 )
 
             summary = await self._complete_checked(
@@ -148,11 +149,19 @@ class ContentService:
         return result.split(marker, 1)[0].rstrip()
 
     def _maps_text(self, chunks) -> str:
-        return "\n\n".join(
-            f"Chunk {c['ordinal']} ({format_timestamp(c['start_seconds'])}–"
-            f"{format_timestamp(c['end_seconds'])}):\n{c['map_summary'] or ''}"
-            for c in chunks
-        )
+        blocks = []
+        for c in chunks:
+            first_line = (c["text"] or "").splitlines()[0] if c["text"] else ""
+            time_based = bool(re.match(r"^\[(?:\d{1,2}:)?\d{2}:\d{2}\]", first_line))
+            if time_based:
+                label = (
+                    f"Chunk {c['ordinal']} ({format_timestamp(c['start_seconds'])}–"
+                    f"{format_timestamp(c['end_seconds'])})"
+                )
+            else:
+                label = f"Chunk {c['ordinal']}"
+            blocks.append(f"{label}:\n{c['map_summary'] or ''}")
+        return "\n\n".join(blocks)
 
     async def _ensure_maps(self, content_id: int, chunks):
         items = [dict(c) for c in chunks]
@@ -201,7 +210,8 @@ class ContentService:
             chars = 0
 
         for seg in segments:
-            line = f"[{format_timestamp(seg.start)}] {seg.text.strip()}"
+            reference = seg.reference or format_timestamp(seg.start)
+            line = f"[{reference}] {seg.text.strip()}"
             if current and chars + len(line) > target_chars:
                 flush()
             if not current:
@@ -215,10 +225,10 @@ class ContentService:
     async def answer(self, user_id: int, question: str) -> str:
         content = self.db.get_current_content(user_id)
         if not content:
-            raise ValueError("שלח קודם קישור לסרטון YouTube.")
+            raise ValueError("שלח קודם קישור.")
         chunks = self.db.get_chunks(content["id"])
         if not chunks:
-            raise RuntimeError("לא נמצאו מקטעים שמורים לסרטון.")
+            raise RuntimeError("לא נמצאו מקטעים שמורים למקור.")
 
         history = self.db.get_recent_qa(user_id, content["id"], limit=6)
         history_text = self._conversation_context(history)
@@ -293,10 +303,10 @@ class ContentService:
     async def translate_current(self, user_id: int) -> tuple[str, str]:
         content = self.db.get_current_content(user_id)
         if not content:
-            raise ValueError("שלח קודם קישור לסרטון YouTube.")
+            raise ValueError("שלח קודם קישור.")
         chunks = self.db.get_chunks(content["id"])
         if not chunks:
-            raise RuntimeError("לא נמצאו מקטעים שמורים לסרטון.")
+            raise RuntimeError("לא נמצאו מקטעים שמורים למקור.")
 
         parts = self._translation_parts(chunks, target_chars=1800)
         semaphore = asyncio.Semaphore(8)
@@ -338,17 +348,22 @@ class ContentService:
 
         translated = await asyncio.gather(*(translate_units(part) for part in parts))
         text = "\n\n".join(translated)
-        rlm = "\u200f"
-        text = "\n".join((rlm + line) if line.strip() else line for line in text.split("\n"))
+        if self.target_language.casefold() in {"hebrew", "עברית", "he"}:
+            rlm = "\u200f"
+            hebrew = re.compile(r"[\u0590-\u05FF]")
+            text = "\n".join(
+                (rlm + line) if line.strip() and hebrew.search(line) else line
+                for line in text.split("\n")
+            )
         safe_title = re.sub(r"[^\w\- ]+", "", content["title"], flags=re.UNICODE).strip()[:70]
-        return (safe_title or "youtube") + "-translated.txt", text
+        return (safe_title or "content") + "-translated.txt", text
 
     def _translation_parts(self, chunks, target_chars: int = 1800):
         units = []
         ordinal = 1
         for chunk in chunks:
             for raw in chunk["text"].splitlines():
-                clean = re.sub(r"^\[[0-9:]+\]\s*", "", raw).strip()
+                clean = re.sub(r"^\[[^\]]+\]\s*", "", raw).strip()
                 if clean:
                     units.append((f"S{ordinal:06d}", clean))
                     ordinal += 1
@@ -371,6 +386,7 @@ class ContentService:
     def transcript_current(self, user_id: int) -> tuple[str, str]:
         content = self.db.get_current_content(user_id)
         if not content:
-            raise ValueError("שלח קודם קישור לסרטון YouTube.")
+            raise ValueError("שלח קודם קישור.")
         safe_title = re.sub(r"[^\w\- ]+", "", content["title"], flags=re.UNICODE).strip()[:70]
-        return (safe_title or "youtube") + "-transcript.txt", content["transcript"]
+        suffix = "transcript" if content["source_type"] == "youtube" else "source"
+        return (safe_title or "content") + f"-{suffix}.txt", content["transcript"]

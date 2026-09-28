@@ -55,3 +55,29 @@ def test_telegram_rendering_and_long_split():
     assert mixed_rtl.startswith("\u200f")
     pure_english = bot._telegram_html("OpenAI released a new model")
     assert not pure_english.startswith("\u200f")
+
+
+def test_generic_section_references_and_web_url_safety():
+    from types import SimpleNamespace
+    from link_reader.processors.webpage import WebPageProcessor
+
+    service = ContentService(None, None, [])
+    segments = [
+        TranscriptSegment(0, 1, "first paragraph", reference="§1"),
+        TranscriptSegment(1, 1, "second paragraph", reference="§2"),
+    ]
+    chunks = service._chunk_segments(segments, target_chars=100)
+    assert "[§1]" in chunks[0]["text"]
+    assert "[§2]" in chunks[0]["text"]
+
+    p = WebPageProcessor(SimpleNamespace())
+    assert p.supports("https://example.com/article")
+    assert not p.supports("https://youtube.com/watch?v=dQw4w9WgXcQ")
+    assert p._normalize_url("https://Example.com/a?utm_source=x&b=2#frag") == "https://example.com/a?b=2"
+    for private_url in ("http://127.0.0.1/", "http://localhost/", "http://169.254.169.254/"):
+        try:
+            p._validate_public_url(private_url)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"private URL was allowed: {private_url}")

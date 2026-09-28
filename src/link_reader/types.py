@@ -8,6 +8,7 @@ class TranscriptSegment:
     start: float
     duration: float
     text: str
+    reference: str | None = None
 
 
 @dataclass
@@ -25,7 +26,7 @@ class ExtractedContent:
     @property
     def transcript_text(self) -> str:
         return "\n".join(
-            f"[{format_timestamp(s.start)}] {s.text.strip()}"
+            f"[{s.reference or format_timestamp(s.start)}] {s.text.strip()}"
             for s in self.segments
             if s.text.strip()
         )

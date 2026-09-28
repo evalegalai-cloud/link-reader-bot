@@ -73,7 +73,7 @@ class TelegramBot:
         if not self._authorized(update):
             return await self._deny(update)
         await update.effective_message.reply_text(
-            "שלח קישור YouTube. אקצר אותו בעברית ואפשר יהיה לשאול עליו.",
+            "שלח קישור. אקצר אותו בעברית ואפשר יהיה לשאול עליו.",
             reply_markup=self._home_keyboard(),
         )
 
@@ -160,7 +160,7 @@ class TelegramBot:
             await update.effective_message.reply_document(
                 document=data,
                 filename=filename,
-                caption="תמלול מקורי",
+                caption="טקסט מלא",
             )
         except Exception as exc:
             await update.effective_message.reply_text(self._friendly_error(exc))
@@ -223,7 +223,7 @@ class TelegramBot:
         return InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("תרגום מלא", callback_data="translate"),
-                InlineKeyboardButton("תמלול", callback_data="transcript"),
+                InlineKeyboardButton("טקסט מלא", callback_data="transcript"),
             ],
             [InlineKeyboardButton("סרטונים", callback_data="videos")],
         ])

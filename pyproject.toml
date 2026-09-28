@@ -10,6 +10,7 @@ dependencies = [
   "httpx>=0.28,<1",
   "anthropic>=0.66,<1",
   "python-dotenv>=1.1,<2",
+  "trafilatura>=2.2,<3",
 ]
 
 [project.optional-dependencies]

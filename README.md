@@ -1,23 +1,23 @@
 # Link Reader Bot
 
-A private-by-default Telegram bot that turns a YouTube link into a structured summary, a full translation, a timestamped transcript, and a grounded Q&A session.
+A private-by-default Telegram bot that turns YouTube videos and web articles into structured summaries, full translations, source text, and grounded Q&A sessions.
 
-The project is currently focused on YouTube, but the core is deliberately source-agnostic so additional processors can later handle web articles, social posts, PDFs, books, podcasts, and other links.
+The core is source-agnostic. YouTube and ordinary web/article links are supported now; PDFs, audio, social links, and a cross-content library are staged next.
 
 ## What it does
 
-Send a YouTube URL to the bot. It will:
+Send a YouTube or article URL to the bot. It will:
 
-1. Detect the video and fetch metadata.
+1. Detect the source and fetch metadata / main content.
 2. Try to use existing YouTube captions or auto-generated captions.
 3. If no captions are available, optionally download audio and transcribe it locally with faster-whisper.
 4. Split long transcripts into timestamped chunks.
 5. Build compact content maps for efficient long-video retrieval.
 6. Generate a structured summary.
-7. Keep the video active so you can ask follow-up questions in natural language.
-8. Return answers grounded in the transcript, with timestamps when possible.
-9. Export the original transcript or a full translation on demand.
-10. Cache processed videos locally so the same video does not need to be processed twice.
+7. Keep the source active so you can ask follow-up questions in natural language, with short conversational memory.
+8. Return answers grounded in the source, with timestamps or section references when possible.
+9. Export the original source text or a full translation on demand.
+10. Cache processed sources locally so the same URL does not need to be processed twice.
 
 ## Language support
 
@@ -46,11 +46,14 @@ The example configuration defaults to Hebrew. The practical language coverage de
 
 - Telegram long polling: no public webhook, domain, TLS certificate, or inbound port required.
 - YouTube watch, youtu.be, Shorts, Live, and embed URL support.
+- Ordinary web pages and long-form articles via Trafilatura.
+- Article section provenance using `[§N]` references.
+- SSRF protection, redirect validation, size limits, and tracking-parameter normalization for web URLs.
 - Existing captions and auto-caption extraction.
 - Optional local Whisper fallback.
 - Timestamp-preserving transcript storage.
 - Chunked summarization for long videos.
-- Follow-up Q&A grounded in transcript excerpts.
+- Follow-up Q&A grounded in source excerpts, with short per-source conversational memory.
 - Full translation export.
 - Original transcript export.
 - SQLite persistence and caching.
@@ -76,13 +79,16 @@ ContentService
    v
 Processor registry
    |
-   v
-YouTubeProcessor
-   |---- captions first
-   |---- local Whisper fallback
+   |---- YouTubeProcessor
+   |       |---- hosted/native captions
+   |       |---- direct captions / optional Whisper fallback
+   |
+   `---- WebPageProcessor
+           |---- safe HTTP fetch
+           `---- Trafilatura main-content extraction
 ```
 
-The processor registry is intentionally generic. Future source types can reuse the same storage, summarization, translation, and Q&A layers.
+The processor registry is intentionally generic. YouTube and web pages already reuse the same storage, summarization, translation, Q&A, cost tracking, and conversational-memory layers.
 
 ## Model routing
 
@@ -139,20 +145,20 @@ docker compose logs -f --tail=200
 ## Telegram commands
 
 - `/start` — help.
-- `/translate` — export a full translation of the active video.
-- `/transcript` — export the original timestamped transcript.
-- `/videos` — list recently processed videos.
-- `/use ID` — switch back to a previous video.
+- `/translate` — export a full translation of the active source.
+- `/transcript` — export the extracted source text.
+- `/videos` — list recently processed sources.
+- `/use ID` — switch back to a previous source.
 
-Any ordinary text message sent after processing a video is treated as a follow-up question about the active video.
+Any ordinary text message sent after processing a source is treated as a follow-up question about it.
 
 ## Hosted transcript provider
 
 Cloud-server IPs are frequently blocked by YouTube. The extraction order is deliberately conservative:
 
-1. Direct YouTube captions from the host.
-2. Supadata, if configured.
-3. A user-configured proxy only as a final fallback.
+1. Supadata native captions, when configured.
+2. Direct YouTube captions from the host.
+3. A user-configured proxy only as a fallback.
 4. Audio download + local Whisper when required.
 
 ```env
@@ -199,7 +205,6 @@ The supplied `.gitignore` excludes the local environment file and runtime data.
 
 The next logical processors are:
 
-- ordinary web pages and articles
 - PDFs and uploaded books/documents
 - podcast and audio links
 - X / Twitter

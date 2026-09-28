@@ -13,19 +13,20 @@ Validation (2026-09-28):
 - TED 2026 (~16m): ingest 14.67s; full translation 17.12s; initial API-equivalent cost ~$0.01277.
 - TED 2024 (~22m): ingest 10.19s; Q&A 4.25s / follow-up 3.82s; initial API-equivalent cost ~$0.01332.
 
-## Stage 2 — Reliability & routing
-- OpenRouter provider routing benchmark
+## Stage 2 — Reliability & routing ✅
+- OpenRouter throughput/latency routing benchmark
 - Retries for 429/5xx/network errors
 - Provider failover
 - Bounded timeouts and concise user-facing errors
-- Preserve provider-reported cost
+- Provider-reported cost
 
-## Stage 3 — Web / Articles
+## Stage 3 — Web / Articles ✅
 - Generic URL classifier + processor registry
-- Main-article extraction
-- Metadata / canonical URL / headings
-- Summary, Q&A, full translation
-- Browser fallback only when normal HTTP extraction fails
+- Safe HTTP fetch with SSRF/redirect/size protections
+- Trafilatura main-article extraction
+- Section provenance `[§N]`
+- Summary, conversational Q&A, source export, full translation
+- Browser fallback deferred until a real extraction failure justifies it
 
 ## Stage 4 — PDFs / books
 - PDF text + page provenance
