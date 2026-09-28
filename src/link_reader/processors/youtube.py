@@ -104,7 +104,7 @@ class YouTubeProcessor:
 
         # 2) Hosted transcript API. This avoids datacenter-IP blocking and is
         # intentionally tried before any user-configured proxy.
-        if self.settings.supadata_api_key:
+        if self._supadata_key():
             try:
                 segments, language = self._supadata_captions(url)
                 if segments:
@@ -156,15 +156,25 @@ class YouTubeProcessor:
             ]
             return segments, selected.language_code
 
+    def _supadata_key(self) -> str | None:
+        if self.settings.supadata_api_key:
+            return self.settings.supadata_api_key
+        path = Path("/data/supadata.key")
+        if path.exists():
+            value = path.read_text(encoding="utf-8").strip()
+            return value or None
+        return None
+
     def _supadata_captions(self, url: str):
-        key = self.settings.supadata_api_key
+        key = self._supadata_key()
         if not key:
             return [], None
 
         params = urllib.parse.urlencode({
             "url": url,
+            "lang": "en",
             "text": "false",
-            "mode": getattr(self.settings, "supadata_mode", "auto"),
+            "mode": getattr(self.settings, "supadata_mode", "native"),
         })
         endpoint = "https://api.supadata.ai/v1/transcript?" + params
         req = urllib.request.Request(
@@ -221,7 +231,7 @@ class YouTubeProcessor:
             req = urllib.request.Request(
                 endpoint,
                 headers={
-                    "x-api-key": self.settings.supadata_api_key,
+                    "x-api-key": self._supadata_key() or "",
                     "User-Agent": "link-reader-bot/0.1",
                 },
             )
