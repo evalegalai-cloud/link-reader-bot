@@ -6,13 +6,13 @@ import random
 import re
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from youtube_transcript_api import NoTranscriptFound, YouTubeTranscriptApi
-import httpx
 from yt_dlp import YoutubeDL
 
 from link_reader.types import ExtractedContent, TranscriptSegment
@@ -50,7 +50,192 @@ class YouTubeProcessor:
     async def extract(self, url: str) -> ExtractedContent:
         return await asyncio.to_thread(self._extract_sync, url)
 
-    def _proxy_candidates(self, limit: int = 24) -> list[str | None]:
+    def _extract_sync(self, url: str) -> ExtractedContent:
+        video_id = self.external_id(url)
+        metadata = self._oembed_metadata(url)
+
+        segments, language, method, caption_error, working_proxy = self._captions(video_id, url)
+
+        if not segments:
+            if self.settings.asr_mode != "local":
+                self._raise_extraction_error(caption_error)
+            try:
+                segments, language = self._transcribe_audio(url, working_proxy)
+                method = "local_whisper"
+            except Exception as audio_error:
+                self._raise_extraction_error(caption_error or audio_error, audio_error)
+
+        return ExtractedContent(
+            external_id=video_id,
+            source_type=self.source_type,
+            url=url,
+            title=metadata.get("title") or f"YouTube {video_id}",
+            author=metadata.get("author"),
+            duration_seconds=None,
+            language=language,
+            segments=segments,
+            extraction_method=method,
+        )
+
+    def _oembed_metadata(self, url: str) -> dict:
+        endpoint = (
+            "https://www.youtube.com/oembed?url="
+            + urllib.parse.quote(url, safe="")
+            + "&format=json"
+        )
+        try:
+            req = urllib.request.Request(endpoint, headers={"User-Agent": "link-reader-bot/0.1"})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                data = json.load(response)
+            return {"title": data.get("title"), "author": data.get("author_name")}
+        except Exception:
+            return {}
+
+    def _captions(self, video_id: str, url: str):
+        last_error = None
+
+        # 1) Direct YouTube access from the host.
+        try:
+            segments, language = self._fetch_youtube_captions(video_id, None)
+            if segments:
+                return segments, language, "youtube_captions_direct", None, None
+        except Exception as exc:
+            last_error = exc
+
+        # 2) Hosted transcript API. This avoids datacenter-IP blocking and is
+        # intentionally tried before any user-configured proxy.
+        if self.settings.supadata_api_key:
+            try:
+                segments, language = self._supadata_captions(url)
+                if segments:
+                    return segments, language, "supadata_transcript", None, None
+            except Exception as exc:
+                last_error = exc
+
+        # 3) Proxy fallback only after direct access and hosted transcript API.
+        for proxy in self._proxy_candidates(include_direct=False):
+            try:
+                segments, language = self._fetch_youtube_captions(video_id, proxy)
+                if segments:
+                    self._last_good_proxy = proxy
+                    return segments, language, "youtube_captions_proxy", None, proxy
+            except Exception as exc:
+                last_error = exc
+
+        return [], None, "none", last_error, None
+
+    def _fetch_youtube_captions(self, video_id: str, proxy: str | None):
+        api = self._transcript_api(proxy)
+        try:
+            fetched = api.fetch(video_id, languages=("en", "he"))
+            segments = [
+                TranscriptSegment(float(x.start), float(x.duration), x.text)
+                for x in fetched
+                if x.text and x.text.strip()
+            ]
+            return segments, getattr(fetched, "language_code", None)
+        except NoTranscriptFound:
+            available = list(api.list(video_id))
+            if not available:
+                return [], None
+
+            preferred = ["en", "he"]
+
+            def score(transcript):
+                lang_score = 0
+                if transcript.language_code in preferred:
+                    lang_score = len(preferred) - preferred.index(transcript.language_code)
+                return (not transcript.is_generated, lang_score)
+
+            selected = sorted(available, key=score, reverse=True)[0]
+            fetched = selected.fetch()
+            segments = [
+                TranscriptSegment(float(x.start), float(x.duration), x.text)
+                for x in fetched
+                if x.text and x.text.strip()
+            ]
+            return segments, selected.language_code
+
+    def _supadata_captions(self, url: str):
+        key = self.settings.supadata_api_key
+        if not key:
+            return [], None
+
+        params = urllib.parse.urlencode({
+            "url": url,
+            "text": "false",
+            "mode": getattr(self.settings, "supadata_mode", "auto"),
+        })
+        endpoint = "https://api.supadata.ai/v1/transcript?" + params
+        req = urllib.request.Request(
+            endpoint,
+            headers={"x-api-key": key, "User-Agent": "link-reader-bot/0.1"},
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=45) as response:
+                status = response.status
+                data = json.load(response)
+        except urllib.error.HTTPError as exc:
+            body = exc.read(1200).decode(errors="ignore")
+            raise RuntimeError(f"Supadata transcript failed ({exc.code}): {body[:500]}") from exc
+
+        if status == 202 or data.get("jobId"):
+            job_id = data.get("jobId")
+            if not job_id:
+                raise RuntimeError("Supadata returned an asynchronous response without a job ID.")
+            data = self._poll_supadata_job(job_id)
+
+        content = data.get("content")
+        language = data.get("lang")
+
+        if isinstance(content, str):
+            text = content.strip()
+            return ([TranscriptSegment(0.0, 0.0, text)] if text else []), language
+
+        if not isinstance(content, list):
+            return [], language
+
+        segments = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            offset_ms = float(item.get("offset") or 0)
+            duration_ms = float(item.get("duration") or 0)
+            segments.append(
+                TranscriptSegment(
+                    start=offset_ms / 1000.0,
+                    duration=duration_ms / 1000.0,
+                    text=text,
+                )
+            )
+        return segments, language
+
+    def _poll_supadata_job(self, job_id: str) -> dict:
+        endpoint = "https://api.supadata.ai/v1/transcript/" + urllib.parse.quote(job_id, safe="")
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            req = urllib.request.Request(
+                endpoint,
+                headers={
+                    "x-api-key": self.settings.supadata_api_key,
+                    "User-Agent": "link-reader-bot/0.1",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.load(response)
+            status = data.get("status")
+            if status == "completed":
+                return data
+            if status == "failed":
+                raise RuntimeError(f"Supadata transcript job failed: {data.get('error')}")
+            time.sleep(1)
+        raise RuntimeError("Supadata transcript job timed out.")
+
+    def _proxy_candidates(self, limit: int = 24, include_direct: bool = True):
         candidates: list[str] = []
         if self._last_good_proxy:
             candidates.append(self._last_good_proxy)
@@ -75,7 +260,16 @@ class YouTubeProcessor:
                 candidates.extend(file_candidates)
 
         unique = list(dict.fromkeys(x for x in candidates if x))
-        return [None, *unique]
+        return ([None] if include_direct else []) + unique
+
+    def _transcript_api(self, proxy: str | None = None):
+        if not proxy:
+            return YouTubeTranscriptApi()
+        from youtube_transcript_api.proxies import GenericProxyConfig
+
+        return YouTubeTranscriptApi(
+            proxy_config=GenericProxyConfig(http_url=proxy, https_url=proxy)
+        )
 
     def _ydl_options(self, download: bool = False, proxy: str | None = None) -> dict:
         opts = {
@@ -91,162 +285,6 @@ class YouTubeProcessor:
             opts["skip_download"] = True
         return opts
 
-    def _oembed_metadata(self, url: str) -> dict:
-        endpoint = (
-            "https://www.youtube.com/oembed?url="
-            + urllib.parse.quote(url, safe="")
-            + "&format=json"
-        )
-        try:
-            with urllib.request.urlopen(endpoint, timeout=15) as response:
-                data = json.load(response)
-            return {
-                "title": data.get("title"),
-                "author": data.get("author_name"),
-            }
-        except Exception:
-            return {}
-
-    def _extract_sync(self, url: str) -> ExtractedContent:
-        video_id = self.external_id(url)
-        metadata = self._oembed_metadata(url)
-
-        if getattr(self.settings, "supadata_api_key", None):
-            try:
-                segments, language = self._supadata_transcript(url)
-                if segments:
-                    return ExtractedContent(
-                        external_id=video_id,
-                        source_type=self.source_type,
-                        url=url,
-                        title=metadata.get("title") or f"YouTube {video_id}",
-                        author=metadata.get("author"),
-                        duration_seconds=None,
-                        language=language,
-                        segments=segments,
-                        extraction_method="supadata",
-                    )
-            except Exception:
-                pass
-
-        segments, language, caption_error, working_proxy = self._captions(video_id)
-        method = "youtube_captions"
-
-        if not segments:
-            if self.settings.asr_mode != "local":
-                self._raise_extraction_error(caption_error)
-            try:
-                segments, language = self._transcribe_audio(url, working_proxy)
-                method = "local_whisper"
-            except Exception as audio_error:
-                self._raise_extraction_error(caption_error or audio_error, audio_error)
-
-        return ExtractedContent(
-            external_id=video_id,
-            source_type=self.source_type,
-            url=url,
-            title=metadata.get("title") or f"YouTube {video_id}",
-            author=metadata.get("author"),
-            duration_seconds=None,
-            language=language,
-            segments=segments,
-            extraction_method=method,
-        )
-
-    def _supadata_transcript(self, url: str):
-        headers = {"x-api-key": self.settings.supadata_api_key}
-        params = {"url": url, "mode": self.settings.supadata_mode}
-        endpoint = "https://api.supadata.ai/v1/transcript"
-
-        with httpx.Client(timeout=120.0) as client:
-            response = client.get(endpoint, headers=headers, params=params)
-            if response.status_code == 202:
-                job_id = response.json().get("jobId")
-                if not job_id:
-                    raise RuntimeError("Supadata returned 202 without a job ID")
-                for _ in range(180):
-                    time.sleep(1)
-                    job = client.get(f"{endpoint}/{job_id}", headers=headers)
-                    job.raise_for_status()
-                    payload = job.json()
-                    status = payload.get("status")
-                    if status == "completed":
-                        return self._segments_from_supadata(payload)
-                    if status == "failed":
-                        raise RuntimeError(payload.get("error") or "Supadata transcription failed")
-                raise RuntimeError("Supadata transcription timed out")
-
-            response.raise_for_status()
-            return self._segments_from_supadata(response.json())
-
-    def _segments_from_supadata(self, payload: dict):
-        content = payload.get("content")
-        language = payload.get("lang")
-        if not isinstance(content, list):
-            raise RuntimeError("Supadata returned an unexpected transcript format")
-        segments = [
-            TranscriptSegment(
-                float(item.get("offset", 0)) / 1000.0,
-                float(item.get("duration", 0)) / 1000.0,
-                str(item.get("text", "")).strip(),
-            )
-            for item in content
-            if str(item.get("text", "")).strip()
-        ]
-        return segments, language
-
-    def _captions(self, video_id: str):
-        last_error = None
-        for proxy in self._proxy_candidates():
-            try:
-                api = self._transcript_api(proxy)
-                try:
-                    fetched = api.fetch(video_id, languages=("en", "he"))
-                    segments = [
-                        TranscriptSegment(float(x.start), float(x.duration), x.text)
-                        for x in fetched
-                        if x.text and x.text.strip()
-                    ]
-                    if proxy:
-                        self._last_good_proxy = proxy
-                    return segments, getattr(fetched, "language_code", None), None, proxy
-                except NoTranscriptFound:
-                    available = list(api.list(video_id))
-                    if not available:
-                        return [], None, None, proxy
-
-                    preferred = ["en", "he"]
-
-                    def score(transcript):
-                        lang_score = 0
-                        if transcript.language_code in preferred:
-                            lang_score = len(preferred) - preferred.index(transcript.language_code)
-                        return (not transcript.is_generated, lang_score)
-
-                    selected = sorted(available, key=score, reverse=True)[0]
-                    fetched = selected.fetch()
-                    segments = [
-                        TranscriptSegment(float(x.start), float(x.duration), x.text)
-                        for x in fetched
-                        if x.text and x.text.strip()
-                    ]
-                    if proxy:
-                        self._last_good_proxy = proxy
-                    return segments, selected.language_code, None, proxy
-            except Exception as exc:
-                last_error = exc
-                continue
-        return [], None, last_error, None
-
-    def _transcript_api(self, proxy: str | None = None):
-        if not proxy:
-            return YouTubeTranscriptApi()
-        from youtube_transcript_api.proxies import GenericProxyConfig
-
-        return YouTubeTranscriptApi(
-            proxy_config=GenericProxyConfig(http_url=proxy, https_url=proxy)
-        )
-
     def _raise_extraction_error(self, caption_error=None, audio_error=None):
         details = " ".join(
             str(exc) for exc in (caption_error, audio_error) if exc is not None
@@ -261,8 +299,9 @@ class YouTubeProcessor:
         )
         if any(marker in details for marker in blocked_markers):
             raise RuntimeError(
-                "YouTube חסם את כתובת ה-IP של השרת וגם את ה-proxies שנוסו. "
-                "יש להגדיר proxy pool פעיל ב-YOUTUBE_PROXY_FILE או rotating residential proxy."
+                "YouTube חסם את כתובת ה-IP של השרת. "
+                "אפשר להגדיר SUPADATA_API_KEY כפתרון המועדף, "
+                "או proxy כ-fallback אחרון."
             )
         raise RuntimeError(
             "לא הצלחתי לקבל כתוביות או אודיו מהסרטון הזה. "
@@ -275,7 +314,7 @@ class YouTubeProcessor:
         except ImportError as exc:
             raise RuntimeError("faster-whisper אינו מותקן. התקן את חבילת [asr].") from exc
 
-        candidates = self._proxy_candidates(limit=6)
+        candidates = self._proxy_candidates(limit=6, include_direct=True)
         if preferred_proxy:
             candidates = [preferred_proxy] + [x for x in candidates if x != preferred_proxy]
 
@@ -319,9 +358,13 @@ class YouTubeProcessor:
                         for s in raw_segments
                         if s.text.strip()
                     ]
+                    if proxy:
+                        self._last_good_proxy = proxy
                     return result, getattr(meta, "language", None)
             except Exception as exc:
                 last_error = exc
                 continue
 
-        raise last_error or RuntimeError("הורדת האודיו נכשלה.")
+        if last_error:
+            raise last_error
+        raise RuntimeError("לא הצלחתי להוריד אודיו לתמלול.")

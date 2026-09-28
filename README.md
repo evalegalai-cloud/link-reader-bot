@@ -148,16 +148,21 @@ Any ordinary text message sent after processing a video is treated as a follow-u
 
 ## Hosted transcript provider
 
-Cloud-server IPs are frequently blocked by YouTube. For reliable production use, the bot can use Supadata before falling back to self-hosted caption/proxy logic.
+Cloud-server IPs are frequently blocked by YouTube. The extraction order is deliberately conservative:
+
+1. Direct YouTube captions from the host.
+2. Supadata, if configured.
+3. A user-configured proxy only as a final fallback.
+4. Audio download + local Whisper when required.
 
 ```env
 SUPADATA_API_KEY=
-SUPADATA_MODE=native
+SUPADATA_MODE=auto
 ```
 
-`native` fetches existing captions only. `auto` falls back to provider-side AI transcription when captions are unavailable. Keep the API key only in the local `.env`.
+`native` fetches existing captions only. `auto` tries native captions first and falls back to provider-side AI transcription when needed. Keep the API key only in the local `.env`.
 
-The self-hosted path also supports either a single `YOUTUBE_PROXY_URL` or a newline-separated rotating pool via `YOUTUBE_PROXY_FILE`.
+Proxy use is optional. The bot supports either a single `YOUTUBE_PROXY_URL` or a newline-separated rotating pool via `YOUTUBE_PROXY_FILE`, but neither is required when the hosted transcript provider succeeds.
 
 ## YouTube reliability
 
