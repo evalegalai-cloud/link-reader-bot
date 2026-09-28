@@ -51,3 +51,7 @@ def test_telegram_rendering_and_long_split():
     assert bot._format_duration(61) == "1:01 דק׳"
     assert bot._format_cost(0.2354) == "כ-23.54 סנט"
     assert bot._format_cost(23.45) == "כ-23.45 דולר"
+    mixed_rtl = bot._telegram_html("**OpenAI:** מודל חדש")
+    assert mixed_rtl.startswith("\u200f")
+    pure_english = bot._telegram_html("OpenAI released a new model")
+    assert not pure_english.startswith("\u200f")

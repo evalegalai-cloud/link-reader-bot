@@ -239,12 +239,10 @@ class TelegramBot:
         return InlineKeyboardMarkup(buttons)
 
     def _force_rtl_lines(self, text: str) -> str:
-        # Telegram chooses paragraph direction from the first strong character.
-        # Prefixing RLM keeps Hebrew paragraphs RTL even when they begin with
-        # an English/Latin name, number, timestamp, or punctuation.
         rlm = "\u200f"
+        hebrew = re.compile(r"[\u0590-\u05FF]")
         return "\n".join(
-            (rlm + line) if line.strip() else line
+            (rlm + line) if line.strip() and hebrew.search(line) else line
             for line in text.split("\n")
         )
 
