@@ -60,6 +60,8 @@ The example configuration defaults to Hebrew. The practical language coverage de
 - Timestamp-preserving transcript storage.
 - Chunked summarization for long videos.
 - Follow-up Q&A grounded in source excerpts, with short per-source conversational memory.
+- Free-form text and short voice-note conversation: active-source answers by default, with explicit library-wide or web-backed routing when requested.
+- Persistent Telegram menu for current source, recent sources, cross-source search, web mode, and help; commands remain optional.
 - Full translation export.
 - Original transcript export.
 - SQLite persistence and caching.

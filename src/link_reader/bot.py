@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from collections import defaultdict
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -79,7 +79,7 @@ class TelegramBot:
             return await self._deny(update)
         await update.effective_message.reply_text(
             self._home_text(user.id),
-            reply_markup=self._home_keyboard(),
+            reply_markup=self._persistent_menu(),
         )
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -95,6 +95,35 @@ class TelegramBot:
             return await self._deny(update)
         text = (update.effective_message.text or "").strip()
         user_id = update.effective_user.id
+
+        if text == "📌 מקור נוכחי":
+            current = self.service.db.get_current_content(user_id)
+            body = f"מקור נוכחי:\n{current['title']}" if current else "אין כרגע מקור פעיל. שלח קישור."
+            return await update.effective_message.reply_text(body)
+        if text == "🗂️ אחרונים":
+            rows = self.service.db.list_recent_content(10)
+            if not rows:
+                return await update.effective_message.reply_text("אין עדיין מקורות שמורים.")
+            return await update.effective_message.reply_text(
+                "בחר מקור:", reply_markup=self._videos_keyboard(rows)
+            )
+        if text == "ℹ️ מה נתמך":
+            return await update.effective_message.reply_text(self._supported_text())
+        if text == "🔎 כל המקורות":
+            context.user_data["next_mode"] = "library"
+            return await update.effective_message.reply_text(
+                "כתוב או הקלט עכשיו שאלה; אחפש בכל המקורות השמורים."
+            )
+        if text == "🌐 אינטרנט":
+            context.user_data["next_mode"] = "web"
+            return await update.effective_message.reply_text(
+                "כתוב או הקלט עכשיו שאלה; אשתמש גם באינטרנט ואפריד מידע חיצוני מהמקור."
+            )
+
+        forced_mode = context.user_data.pop("next_mode", None)
+        if forced_mode:
+            return await self._handle_question(update, text, user_id, force_mode=forced_mode)
+
         library_question = re.match(r"^(?:שאל\s+הכל|askall)\s+(.+)$", text, re.IGNORECASE)
         if library_question:
             return await self._handle_library_answer(update, library_question.group(1).strip(), user_id)
@@ -118,7 +147,7 @@ class TelegramBot:
         is_voice = message.voice is not None
         duration = int(getattr(media, "duration", 0) or 0)
         current = self.service.db.get_current_content(user_id)
-        as_question = bool(is_voice and current is not None and duration <= 120)
+        as_question = bool(is_voice and duration <= 120)
         status = await message.reply_text("מקשיב…" if as_question else "מתמלל…")
 
         suffix = ".ogg" if is_voice else Path(getattr(media, "file_name", "") or "audio.bin").suffix or ".bin"
@@ -151,7 +180,10 @@ class TelegramBot:
                     question = " ".join(seg.text.strip() for seg in item.segments if seg.text.strip())
                     if not question:
                         raise ValueError("לא הצלחתי להבין את ההודעה הקולית.")
-                    answer = await self.service.answer(user_id, question)
+                    forced_mode = context.user_data.pop("next_mode", None)
+                    answer, _mode = await self.service.answer_freeform(
+                        user_id, question, force_mode=forced_mode
+                    )
                     await status.delete()
                     return await self._send_long(
                         message, answer, reply_markup=self._content_keyboard()
@@ -222,13 +254,17 @@ class TelegramBot:
                     reply_markup=self._home_keyboard(),
                 )
 
-    async def _handle_question(self, update: Update, question: str, user_id: int):
+    async def _handle_question(
+        self, update: Update, question: str, user_id: int, force_mode: str | None = None
+    ):
         if not question:
             return
         async with self._locks[user_id]:
             status = await update.effective_message.reply_text("בודק…")
             try:
-                answer = await self.service.answer(user_id, question)
+                answer, _mode = await self.service.answer_freeform(
+                    user_id, question, force_mode=force_mode
+                )
                 await status.delete()
                 await self._send_long(
                     update.effective_message, answer, reply_markup=self._content_keyboard()
@@ -414,6 +450,18 @@ class TelegramBot:
             "• /search מילות חיפוש\n"
             "• /askall שאלה על כל המקורות\n"
             "אפשר גם לכתוב: חפש … / שאל הכל …"
+        )
+
+    def _persistent_menu(self):
+        return ReplyKeyboardMarkup(
+            [
+                [KeyboardButton("📌 מקור נוכחי"), KeyboardButton("🗂️ אחרונים")],
+                [KeyboardButton("🔎 כל המקורות"), KeyboardButton("🌐 אינטרנט")],
+                [KeyboardButton("ℹ️ מה נתמך")],
+            ],
+            resize_keyboard=True,
+            is_persistent=True,
+            input_field_placeholder="כתוב חופשי או שלח הודעה קולית…",
         )
 
     def _home_keyboard(self):

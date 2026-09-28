@@ -369,3 +369,32 @@ def test_library_fts_search_indexes_saved_chunks(tmp_path):
     assert rows[0]["content_id"] == content_id
     assert "אגירת אנרגיה" in rows[0]["text"]
     assert db.search_library("מונחשאיננוקייםבמאגר") == []
+
+
+def test_freeform_router_keeps_source_default_and_menu_persistent():
+    from types import SimpleNamespace
+    from link_reader.bot import TelegramBot
+    from link_reader.service import ContentService
+
+    class StubDB:
+        def __init__(self, current):
+            self.current = current
+
+        def get_current_content(self, user_id):
+            return self.current
+
+    service = ContentService(StubDB({"id": 1, "title": "Source"}), None, [])
+    assert service._freeform_mode(1, "מה הוא אומר על זה היום?") == "source"
+    assert service._freeform_mode(1, "בדוק באינטרנט מה המצב היום") == "web"
+    assert service._freeform_mode(1, "מה השתנה מאז הסרטון?") == "web"
+    assert service._freeform_mode(1, "מה אומרים כל המקורות על הנושא?") == "library"
+
+    no_source = ContentService(StubDB(None), None, [])
+    assert no_source._freeform_mode(1, "מה קורה היום?") == "web"
+    assert no_source._freeform_mode(1, "תסביר לי מה זה") == "general"
+
+    menu = TelegramBot(SimpleNamespace(), SimpleNamespace())._persistent_menu()
+    labels = [button.text for row in menu.keyboard for button in row]
+    assert menu.is_persistent is True
+    assert "🌐 אינטרנט" in labels
+    assert "🔎 כל המקורות" in labels

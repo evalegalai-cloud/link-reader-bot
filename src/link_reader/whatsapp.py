@@ -256,10 +256,7 @@ class WhatsAppGateway:
                 sender,
                 f"{prefix}{content['title']}\n\n{content['summary']}{footer}\n\nאפשר לשאול שאלה או לשלוח קישור חדש.",
             )
-        current = self.service.db.get_current_content(user_id)
-        if not current:
-            return await self.send_text(sender, "שלח קישור או הודעה קולית כדי להתחיל.")
-        answer = await self.service.answer(user_id, text)
+        answer, _mode = await self.service.answer_freeform(user_id, text)
         await self.send_text(sender, answer)
 
     async def _handle_audio(self, sender: str, user_id: int, message: dict) -> None:
@@ -276,7 +273,7 @@ class WhatsAppGateway:
             duration = processor._duration_seconds(path) or 0.0
             mime_lower = (mime or str(audio.get("mime_type") or "")).lower()
             is_voice = bool(audio.get("voice")) or ("audio/ogg" in mime_lower and "opus" in mime_lower)
-            as_question = bool(current is not None and is_voice and duration <= 120)
+            as_question = bool(is_voice and duration <= 120)
             item = await processor.extract_local_file(
                 path,
                 external_id=f"whatsapp-{media_id}",
@@ -286,7 +283,7 @@ class WhatsAppGateway:
             )
             if as_question:
                 question = " ".join(seg.text.strip() for seg in item.segments if seg.text.strip())
-                answer = await self.service.answer(user_id, question)
+                answer, _mode = await self.service.answer_freeform(user_id, question)
                 return await self.send_text(sender, answer)
             started = time.monotonic()
             content, cached = await self.service.ingest_item(item, user_id)
@@ -371,10 +368,11 @@ class WhatsAppGateway:
         current = self.service.db.get_current_content(user_id)
         lines = [
             "שלח קישור, טקסט או הודעה קולית.",
-            "קישור חדש יוצר מקור; טקסט שואל על המקור הנוכחי.",
-            "הודעה קולית קצרה שואלת בקול כשיש מקור פתוח.",
+            "קישור חדש יוצר מקור; טקסט חופשי נשאל כברירת מחדל על המקור הנוכחי.",
+            "הודעה קולית קצרה היא שאלה חופשית; הודעה/קובץ ארוכים נשמרים כמקור.",
             "אפשר לכתוב: מקור נוכחי · אחרונים · תפריט",
             "ספרייה: חפש <מילים> · שאל הכל <שאלה>",
+            "אינטרנט: כתוב במפורש 'בדוק באינטרנט' / 'ידע כללי' / שאלה עדכנית.",
         ]
         if current:
             lines.append(f"\nמקור נוכחי: {current['title']}")

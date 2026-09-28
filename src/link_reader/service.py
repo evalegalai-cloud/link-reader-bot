@@ -28,6 +28,18 @@ When possible, cite the exact source reference: a timestamp such as [MM:SS], an 
 If the excerpts do not support an answer, say so clearly instead of guessing.
 When answering in Hebrew, on the first meaningful occurrence of an important foreign proper name, technical term, title, Latin/Greek expression, or term whose original spelling matters, include the original-language form in parentheses after the Hebrew form. Do this selectively, not for ordinary words.
 Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold."""
+FREEFORM_GENERAL_SYSTEM = """Answer the user's request naturally and directly.
+Use general knowledge when no saved source is active.
+Do not pretend that a saved source supports a fact when it does not.
+Answer in Hebrew by default unless the user asks for another language."""
+
+SOURCE_WEB_SYSTEM = """Answer the user's question using the supplied saved-source excerpts as the primary evidence.
+You may use web search only for the external or current context the user is asking for.
+Clearly distinguish what comes from the saved source from what comes from external web information.
+Do not silently replace the saved source with web material.
+Preserve useful source references already present in the excerpts.
+Answer in Hebrew by default unless the user asks for another language."""
+
 LIBRARY_QA_SYSTEM = """Answer only from the supplied excerpts from the user's saved source library.
 Do not use outside knowledge or guess.
 For every substantive claim, cite the source as [#ID] using the supplied source ID.
@@ -299,6 +311,103 @@ class ContentService:
             max_tokens=1400,
             tier="smart",
             reasoning_effort="none",
+        )
+
+    def _freeform_mode(self, user_id: int, text: str, force_mode: str | None = None) -> str:
+        if force_mode in {"source", "library", "web", "general"}:
+            return force_mode
+        lowered = (text or "").casefold()
+        library_signals = (
+            "בכל המקורות", "מכל המקורות", "בספרייה", "בספרית", "כל המקורות",
+            "השווה בין המקורות", "חוצה מקורות", "שאל הכל", "ask all", "library",
+        )
+        web_signals = (
+            "באינטרנט", "מהאינטרנט", "ברשת", "חפש ברשת", "חפש באינטרנט",
+            "בדוק באינטרנט", "ידע כללי", "מידע חיצוני", "מקור חיצוני",
+            "מעבר לסרטון", "מעבר למסמך", "מעבר לספר", "מה ידוע היום",
+            "נכון להיום", "נכון לעכשיו", "עדכני", "הכי חדש", "האחרון ביותר",
+            "latest", "current", "on the web", "internet", "web search",
+        )
+        freshness_signals = (
+            "היום", "כרגע", "עכשיו", "השבוע", "החודש", "לאחרונה",
+            "מחיר נוכחי", "שער נוכחי", "latest", "today", "currently", "recent",
+        )
+        if any(signal in lowered for signal in library_signals):
+            return "library"
+        if any(signal in lowered for signal in web_signals):
+            return "web"
+        current = self.db.get_current_content(user_id)
+        if current:
+            changed_since_signals = (
+                "מה קרה מאז", "מה השתנה מאז", "השתנה מאז", "מאז הסרטון",
+                "מאז המסמך", "מאז הספר", "לעומת היום", "לעומת המצב היום",
+            )
+            if any(signal in lowered for signal in changed_since_signals):
+                return "web"
+            return "source"
+        if any(signal in lowered for signal in freshness_signals):
+            return "web"
+        return "general"
+
+    async def answer_freeform(
+        self, user_id: int, question: str, force_mode: str | None = None
+    ) -> tuple[str, str]:
+        mode = self._freeform_mode(user_id, question, force_mode=force_mode)
+        if mode == "library":
+            return await self.answer_library(question), mode
+        if mode == "web":
+            return await self.answer_with_web(user_id, question), mode
+        if mode == "source":
+            return await self.answer(user_id, question), mode
+
+        answer = await self.llm.complete(
+            FREEFORM_GENERAL_SYSTEM
+            + f"\nDefault answer language: {self.target_language}.",
+            question,
+            max_tokens=1200,
+            tier="smart",
+            reasoning_effort="none",
+        )
+        return answer, "general"
+
+    async def answer_with_web(self, user_id: int, question: str) -> str:
+        content = self.db.get_current_content(user_id)
+        if not content:
+            return await self.llm.complete_with_web(
+                FREEFORM_GENERAL_SYSTEM
+                + "\nUse web search for current/external factual information and cite it.",
+                question,
+                max_tokens=1600,
+                tier="smart",
+                max_tool_calls=3,
+            )
+
+        chunks = self.db.get_chunks(content["id"])
+        if not chunks:
+            raise RuntimeError("לא נמצאו מקטעים שמורים למקור.")
+        history = self.db.get_recent_qa(user_id, content["id"], limit=4)
+        history_text = self._conversation_context(history)
+        total_chars = sum(len(c["text"]) for c in chunks)
+        selected = list(chunks) if total_chars <= 45_000 else await self._select_chunks(
+            question, chunks, history_text
+        )
+        evidence = "\n\n".join(
+            f"--- Saved source chunk {c['ordinal']} ---\n{c['text']}" for c in selected
+        )
+        prompt = (
+            f"Saved source title: {content['title']}\n"
+            f"User question: {question}\n\n"
+            f"Saved-source excerpts:\n{evidence}\n\n"
+            "Use the saved source as the primary frame. Search the web only for the "
+            "external/current context requested by the user."
+        )
+        return await self.llm.complete_with_web(
+            SOURCE_WEB_SYSTEM
+            + f"\nDefault answer language: {self.target_language}.",
+            prompt,
+            max_tokens=1800,
+            tier="smart",
+            max_tool_calls=3,
         )
 
     async def answer(self, user_id: int, question: str) -> str:

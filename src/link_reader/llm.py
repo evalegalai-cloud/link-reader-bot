@@ -160,6 +160,98 @@ class LLMClient:
             return "\n".join(x.get("text", "") for x in content if isinstance(x, dict)).strip()
         return str(content).strip()
 
+    async def complete_with_web(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 1600,
+        tier: str = "smart",
+        max_tool_calls: int = 3,
+    ) -> str:
+        # OpenRouter server-side web search with compact source links.
+        if not self.base_url or "openrouter.ai" not in self.base_url:
+            raise RuntimeError("Web search currently requires the OpenRouter route")
+
+        model = self._model_for(tier)
+        url = self.base_url.rstrip("/")
+        if not url.endswith("/chat/completions"):
+            if not url.endswith("/v1"):
+                url += "/v1"
+            url += "/chat/completions"
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.2,
+            "max_tokens": max_tokens,
+            "tools": [{"type": "openrouter:web_search"}],
+            "max_tool_calls": max(1, min(int(max_tool_calls), 5)),
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        retryable_statuses = {408, 425, 429, 500, 502, 503, 504}
+        delays = (0.5, 1.5)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+            for attempt in range(3):
+                try:
+                    response = await client.post(url, headers=headers, json=payload)
+                    if response.status_code in retryable_statuses and attempt < 2:
+                        await asyncio.sleep(delays[attempt])
+                        continue
+                    response.raise_for_status()
+                    data = response.json()
+                    break
+                except (httpx.TimeoutException, httpx.NetworkError):
+                    if attempt >= 2:
+                        raise
+                    await asyncio.sleep(delays[attempt])
+            else:
+                raise RuntimeError("Web-enabled LLM request failed after retries")
+
+        usage = data.get("usage") or {}
+        self._record_usage(
+            model,
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+            cached_input_tokens=(usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+            provider_cost_usd=usage.get("cost", 0.0),
+        )
+        message = (data.get("choices") or [{}])[0].get("message") or {}
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\n".join(
+                item.get("text", "") for item in content if isinstance(item, dict)
+            ).strip()
+        else:
+            content = str(content or "").strip()
+
+        sources = []
+        seen = set()
+        for annotation in message.get("annotations") or []:
+            citation = annotation.get("url_citation") if isinstance(annotation, dict) else None
+            if not citation:
+                continue
+            link = str(citation.get("url") or "").strip()
+            title = str(citation.get("title") or "").strip()
+            if not link or link in seen:
+                continue
+            seen.add(link)
+            sources.append((title, link))
+            if len(sources) >= 5:
+                break
+        if sources:
+            source_lines = []
+            for idx, (title, link) in enumerate(sources, start=1):
+                label = title[:120] if title else link
+                source_lines.append(f"{idx}. {label}\n{link}")
+            content = content.rstrip() + "\n\nמקורות חיצוניים:\n" + "\n".join(source_lines)
+        return content
+
     async def _anthropic(
         self, system: str, user: str, max_tokens: int, model: str
     ) -> str:
