@@ -36,7 +36,7 @@ class TelegramBot:
             .build()
         )
         app.add_handler(CommandHandler("start", self.start))
-        app.add_handler(CommandHandler("help", self.start))
+        app.add_handler(CommandHandler("help", self.help))
         app.add_handler(CommandHandler("translate", self.translate))
         app.add_handler(CommandHandler("transcript", self.transcript))
         app.add_handler(CommandHandler("videos", self.videos))
@@ -73,8 +73,16 @@ class TelegramBot:
         if not self._authorized(update):
             return await self._deny(update)
         await update.effective_message.reply_text(
-            "שלח קישור. אקצר אותו בעברית ואפשר יהיה לשאול עליו.",
+            self._home_text(user.id),
             reply_markup=self._home_keyboard(),
+        )
+
+    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._authorized(update):
+            return await self._deny(update)
+        await update.effective_message.reply_text(
+            self._supported_text(),
+            reply_markup=self._nav_keyboard(),
         )
 
     async def message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,9 +98,7 @@ class TelegramBot:
     async def _handle_url(self, update: Update, url: str, user_id: int):
         async with self._locks[user_id]:
             started = time.monotonic()
-            status = await update.effective_message.reply_text(
-                "מעבד את הסרטון… לרוב 10–30 שניות."
-            )
+            status = await update.effective_message.reply_text("מעבד…")
             try:
                 content, cached = await self.service.ingest(url, user_id)
                 elapsed = time.monotonic() - started
@@ -117,7 +123,10 @@ class TelegramBot:
                     )
             except Exception as exc:
                 logger.exception("Failed processing URL")
-                await status.edit_text(f"לא הצלחתי לעבד: {self._friendly_error(exc)}")
+                await status.edit_text(
+                    f"לא הצלחתי לעבד: {self._friendly_error(exc)}",
+                    reply_markup=self._home_keyboard(),
+                )
 
     async def _handle_question(self, update: Update, question: str, user_id: int):
         if not question:
@@ -127,16 +136,20 @@ class TelegramBot:
             try:
                 answer = await self.service.answer(user_id, question)
                 await status.delete()
-                await self._send_long(update.effective_message, answer)
+                await self._send_long(
+                    update.effective_message, answer, reply_markup=self._content_keyboard()
+                )
             except Exception as exc:
-                await status.edit_text(self._friendly_error(exc))
+                await status.edit_text(
+                    self._friendly_error(exc), reply_markup=self._content_keyboard()
+                )
 
     async def translate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._authorized(update):
             return await self._deny(update)
         user_id = update.effective_user.id
         async with self._locks[user_id]:
-            status = await update.effective_message.reply_text("מתרגם את הסרטון…")
+            status = await update.effective_message.reply_text("מתרגם…")
             try:
                 filename, text = await self.service.translate_current(user_id)
                 data = io.BytesIO(text.encode("utf-8"))
@@ -145,10 +158,13 @@ class TelegramBot:
                     document=data,
                     filename=filename,
                     caption="תרגום מלא",
+                    reply_markup=self._content_keyboard(),
                 )
                 await status.delete()
             except Exception as exc:
-                await status.edit_text(self._friendly_error(exc))
+                await status.edit_text(
+                    self._friendly_error(exc), reply_markup=self._content_keyboard()
+                )
 
     async def transcript(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._authorized(update):
@@ -161,18 +177,21 @@ class TelegramBot:
                 document=data,
                 filename=filename,
                 caption="טקסט מלא",
+                reply_markup=self._content_keyboard(),
             )
         except Exception as exc:
-            await update.effective_message.reply_text(self._friendly_error(exc))
+            await update.effective_message.reply_text(
+                self._friendly_error(exc), reply_markup=self._content_keyboard()
+            )
 
     async def videos(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._authorized(update):
             return await self._deny(update)
         rows = self.service.db.list_recent_content(10)
         if not rows:
-            return await update.effective_message.reply_text("אין עדיין סרטונים שמורים.")
+            return await update.effective_message.reply_text("אין עדיין מקורות שמורים.")
         await update.effective_message.reply_text(
-            "בחר סרטון:",
+            "בחר מקור:",
             reply_markup=self._videos_keyboard(rows),
         )
 
@@ -183,7 +202,7 @@ class TelegramBot:
             return await update.effective_message.reply_text("/use ID")
         content = self.service.db.get_content(int(context.args[0]))
         if not content:
-            return await update.effective_message.reply_text("לא מצאתי את הסרטון.")
+            return await update.effective_message.reply_text("לא מצאתי את המקור.")
         self.service.db.set_current_content(update.effective_user.id, content["id"])
         await update.effective_message.reply_text(
             f"נבחר: {content['title']}",
@@ -195,47 +214,133 @@ class TelegramBot:
         await query.answer()
         if not self._authorized(update):
             return await query.message.reply_text("אין הרשאה להשתמש בבוט הזה.")
+        user_id = update.effective_user.id
+
+        if query.data == "home":
+            return await query.edit_message_text(
+                self._home_text(user_id), reply_markup=self._home_keyboard()
+            )
+        if query.data == "help":
+            return await query.edit_message_text(
+                self._supported_text(), reply_markup=self._nav_keyboard()
+            )
+        if query.data == "current":
+            content = self.service.db.get_current_content(user_id)
+            if not content:
+                return await query.edit_message_text(
+                    "אין מקור נוכחי. שלח קישור.", reply_markup=self._home_keyboard()
+                )
+            return await query.edit_message_text(
+                f"מקור נוכחי:\n{content['title']}",
+                reply_markup=self._content_keyboard(),
+            )
+        if query.data == "ask":
+            return await query.edit_message_text(
+                "כתוב את השאלה שלך על המקור הנוכחי.",
+                reply_markup=self._nav_keyboard(),
+            )
         if query.data == "translate":
             return await self.translate(update, context)
         if query.data == "transcript":
             return await self.transcript(update, context)
         if query.data == "videos":
-            return await self.videos(update, context)
+            rows = self.service.db.list_recent_content(10)
+            if not rows:
+                return await query.edit_message_text(
+                    "אין עדיין מקורות שמורים.", reply_markup=self._nav_keyboard()
+                )
+            return await query.edit_message_text(
+                "בחר מקור:", reply_markup=self._videos_keyboard(rows)
+            )
         if query.data and query.data.startswith("use:"):
             content_id = query.data.split(":", 1)[1]
             if not content_id.isdigit():
                 return
             content = self.service.db.get_content(int(content_id))
             if not content:
-                return await query.message.reply_text("לא מצאתי את הסרטון.")
-            self.service.db.set_current_content(update.effective_user.id, content["id"])
-            return await query.message.reply_text(
-                f"נבחר: {content['title']}",
+                return await query.edit_message_text(
+                    "לא מצאתי את המקור.", reply_markup=self._nav_keyboard()
+                )
+            self.service.db.set_current_content(user_id, content["id"])
+            return await query.edit_message_text(
+                f"נבחר:\n{content['title']}",
                 reply_markup=self._content_keyboard(),
             )
 
+    def _home_text(self, user_id: int) -> str:
+        current = self.service.db.get_current_content(user_id)
+        if current:
+            return f"שלח קישור חדש, או המשך עם:\n{current['title']}"
+        return "שלח קישור כדי להתחיל."
+
+    def _supported_text(self) -> str:
+        return (
+            "נתמך עכשיו:\n"
+            "• YouTube\n"
+            "• כתבות ואתרים\n"
+            "• PDF עם שכבת טקסט\n"
+            "• MP3 / M4A / WAV ועוד\n"
+            "• TikTok / Instagram / Facebook ציבוריים\n"
+            "• X עם וידאו — ניסיוני\n\n"
+            "PDF סרוק ללא טקסט עדיין דורש OCR."
+        )
+
     def _home_keyboard(self):
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("מקור נוכחי", callback_data="current"),
+                InlineKeyboardButton("אחרונים", callback_data="videos"),
+            ],
+            [InlineKeyboardButton("מה נתמך", callback_data="help")],
+        ])
+
+    def _nav_keyboard(self):
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton("סרטונים", callback_data="videos"),
+            InlineKeyboardButton("מקור נוכחי", callback_data="current"),
+            InlineKeyboardButton("תפריט ראשי", callback_data="home"),
         ]])
 
-    def _content_keyboard(self):
-        return InlineKeyboardMarkup([
+    def _content_keyboard(self, include_ask: bool = True):
+        rows = []
+        if include_ask:
+            rows.append([InlineKeyboardButton("שאל שאלה", callback_data="ask")])
+        rows.extend([
             [
                 InlineKeyboardButton("תרגום מלא", callback_data="translate"),
                 InlineKeyboardButton("טקסט מלא", callback_data="transcript"),
             ],
-            [InlineKeyboardButton("סרטונים", callback_data="videos")],
+            [
+                InlineKeyboardButton("אחרונים", callback_data="videos"),
+                InlineKeyboardButton("תפריט ראשי", callback_data="home"),
+            ],
         ])
+        return InlineKeyboardMarkup(rows)
+
+    def _source_label(self, source_type: str) -> str:
+        return {
+            "youtube": "YouTube",
+            "web": "כתבה",
+            "pdf": "PDF",
+            "audio": "אודיו",
+            "social_video": "וידאו",
+        }.get(source_type or "", "מקור")
 
     def _videos_keyboard(self, rows):
         buttons = []
         for row in rows:
             title = row["title"] or "ללא כותרת"
-            label = title if len(title) <= 48 else title[:45].rstrip() + "…"
+            prefix = self._source_label(row["source_type"])
+            available = max(8, 48 - len(prefix) - 3)
+            short = title if len(title) <= available else title[: available - 1].rstrip() + "…"
             buttons.append([
-                InlineKeyboardButton(label, callback_data=f"use:{row['id']}")
+                InlineKeyboardButton(
+                    f"{prefix} · {short}", callback_data=f"use:{row['id']}"
+                )
             ])
+        buttons.append([
+            InlineKeyboardButton("מקור נוכחי", callback_data="current"),
+            InlineKeyboardButton("תפריט ראשי", callback_data="home"),
+        ])
         return InlineKeyboardMarkup(buttons)
 
     def _force_rtl_lines(self, text: str) -> str:
@@ -303,9 +408,14 @@ class TelegramBot:
         hours, minutes = divmod(minutes, 60)
         return f"{hours}:{minutes:02d}:{secs:02d}"
 
-    async def _send_long(self, message, text: str):
-        for chunk in self._split_text(text):
-            await message.reply_text(self._telegram_html(chunk), parse_mode="HTML")
+    async def _send_long(self, message, text: str, reply_markup=None):
+        chunks = self._split_text(text)
+        for i, chunk in enumerate(chunks):
+            await message.reply_text(
+                self._telegram_html(chunk),
+                parse_mode="HTML",
+                reply_markup=reply_markup if i == len(chunks) - 1 else None,
+            )
 
     def _friendly_error(self, exc: Exception) -> str:
         text = str(exc).strip()

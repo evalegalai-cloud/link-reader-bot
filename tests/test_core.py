@@ -112,3 +112,34 @@ def test_audio_and_social_processor_routing():
     assert social.supports("https://x.com/user/status/123")
     assert social.supports("https://www.facebook.com/reel/123")
     assert not social.supports("https://example.com/video")
+
+
+def test_telegram_navigation_is_complete():
+    from types import SimpleNamespace
+    from link_reader.bot import TelegramBot
+
+    class DB:
+        def get_current_content(self, user_id):
+            return {"title": "Current source"}
+
+    bot = TelegramBot(SimpleNamespace(), SimpleNamespace(db=DB()))
+
+    def labels(markup):
+        return [button.text for row in markup.inline_keyboard for button in row]
+
+    home = labels(bot._home_keyboard())
+    assert {"מקור נוכחי", "אחרונים", "מה נתמך"}.issubset(home)
+
+    content = labels(bot._content_keyboard())
+    assert {"שאל שאלה", "תרגום מלא", "טקסט מלא", "אחרונים", "תפריט ראשי"}.issubset(content)
+
+    nav = labels(bot._nav_keyboard())
+    assert nav == ["מקור נוכחי", "תפריט ראשי"]
+
+    recent = labels(bot._videos_keyboard([
+        {"id": 1, "title": "Article", "source_type": "web"},
+        {"id": 2, "title": "Video", "source_type": "youtube"},
+    ]))
+    assert "כתבה · Article" in recent
+    assert "YouTube · Video" in recent
+    assert "מקור נוכחי" in recent and "תפריט ראשי" in recent
