@@ -25,17 +25,21 @@ class LLMClient:
 
     def _record_usage(
         self, model: str, input_tokens: int = 0, output_tokens: int = 0,
-        cached_input_tokens: int = 0,
+        cached_input_tokens: int = 0, provider_cost_usd: float = 0.0,
     ) -> None:
         tracker = self._usage_tracker.get()
         if tracker is None:
             return
         row = tracker["by_model"].setdefault(
-            model, {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0}
+            model, {
+                "input_tokens": 0, "output_tokens": 0,
+                "cached_input_tokens": 0, "provider_cost_usd": 0.0,
+            }
         )
         row["input_tokens"] += int(input_tokens or 0)
         row["output_tokens"] += int(output_tokens or 0)
         row["cached_input_tokens"] += int(cached_input_tokens or 0)
+        row["provider_cost_usd"] += float(provider_cost_usd or 0.0)
 
     def estimate_usage_cost_usd(self, tracker: dict) -> float | None:
         # Current public API-equivalent rates per million tokens.
@@ -44,6 +48,13 @@ class LLMClient:
             "glm-5.3": (1.40, 4.40, 0.26),
             "glm-5.2": (1.40, 4.40, 0.26),
         }
+        actual = sum(
+            float(usage.get("provider_cost_usd", 0.0) or 0.0)
+            for usage in tracker.get("by_model", {}).values()
+        )
+        if actual > 0:
+            return actual
+
         total = 0.0
         saw_known = False
         for model, usage in tracker.get("by_model", {}).items():
@@ -69,9 +80,8 @@ class LLMClient:
         reasoning_effort: str | None = None,
     ) -> str:
         model = self._model_for(tier)
-        # DeepSeek V4 enables expensive thinking by default. Subconscious
-        # currently honors the no-thinking controls on its OpenAI-compatible
-        # endpoint, but not on the Anthropic-compatible endpoint.
+        # DeepSeek V4 can spend substantial latency on hidden reasoning.
+        # For routine summarization, translation and grounded Q&A we disable it.
         if reasoning_effort == "none" and "deepseek" in model.lower():
             return await self._openai_compatible(
                 system, user, max_tokens, model, reasoning_effort="none"
@@ -104,7 +114,10 @@ class LLMClient:
             "max_tokens": max_tokens,
         }
         if reasoning_effort == "none" and "deepseek" in model.lower():
-            payload["thinking"] = {"type": "disabled"}
+            if self.base_url and "openrouter.ai" in self.base_url:
+                payload["reasoning"] = {"enabled": False}
+            else:
+                payload["thinking"] = {"type": "disabled"}
             payload["reasoning_effort"] = "none"
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(url, headers=headers, json=payload)
@@ -116,6 +129,7 @@ class LLMClient:
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=usage.get("completion_tokens", 0),
             cached_input_tokens=(usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+            provider_cost_usd=usage.get("cost", 0.0),
         )
         content = data["choices"][0]["message"]["content"]
         if isinstance(content, list):

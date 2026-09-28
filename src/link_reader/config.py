@@ -31,6 +31,12 @@ class Settings:
         raw_ids = os.getenv("TELEGRAM_ALLOWED_USER_IDS", "")
         ids = frozenset(int(x.strip()) for x in raw_ids.split(",") if x.strip())
         legacy_model = os.getenv("LLM_MODEL", "").strip()
+        llm_base_url = os.getenv("LLM_BASE_URL") or None
+        llm_api_key = os.environ.get("LLM_API_KEY", "").strip()
+        if llm_base_url and "openrouter.ai" in llm_base_url:
+            openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+            if openrouter_key:
+                llm_api_key = openrouter_key
         return cls(
             telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
             allowed_user_ids=ids,
@@ -38,8 +44,8 @@ class Settings:
             llm_provider=os.getenv("LLM_PROVIDER", "openai_compatible").strip().lower(),
             llm_model_fast=os.getenv("LLM_MODEL_FAST", legacy_model).strip(),
             llm_model_smart=os.getenv("LLM_MODEL_SMART", legacy_model).strip(),
-            llm_api_key=os.environ.get("LLM_API_KEY", "").strip(),
-            llm_base_url=os.getenv("LLM_BASE_URL") or None,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
             asr_mode=os.getenv("ASR_MODE", "local").strip().lower(),
             whisper_model=os.getenv("WHISPER_MODEL", "small").strip(),
             youtube_proxy_url=os.getenv("YOUTUBE_PROXY_URL") or None,
