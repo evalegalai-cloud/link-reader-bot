@@ -210,9 +210,9 @@ The supplied `.gitignore` excludes the local environment file and runtime data.
 
 The next logical processors are:
 
-- scanned-PDF OCR and uploaded books/documents
-- podcast RSS/page discovery
-- Reddit and text-only social posts
+- scanned-PDF OCR ✅ and uploaded books/documents
+- podcast RSS/page discovery ✅
+- Reddit text posts/comments ✅; X/Twitter text-only remains experimental
 - LinkedIn
 
 These should remain thin source adapters over the same transcript/content pipeline rather than separate applications.

@@ -200,3 +200,92 @@ def test_local_audio_prefers_openai_transcriber(tmp_path):
     assert item.extraction_method == "openai_gpt_transcribe"
     assert item.source_type == "voice"
     assert item.transcript_text == "[00:00] hello world"
+
+
+def test_podcast_rss_and_page_discovery():
+    from types import SimpleNamespace
+    from link_reader.processors.podcast import PodcastProcessor, _DiscoveryParser
+
+    p = PodcastProcessor(SimpleNamespace(
+        asr_mode="local", whisper_model="small", max_video_minutes=360, supadata_api_key=None
+    ))
+    assert p.supports("https://example.com/podcast/my-show")
+    assert p.supports("https://example.com/feed.xml")
+    assert p.supports("https://podcasts.apple.com/us/podcast/example/id123")
+    assert not p.supports("https://example.com/news/article")
+
+    rss = """<?xml version="1.0"?>
+    <rss version="2.0">
+      <channel>
+        <title>Example Show</title>
+        <item>
+          <title>Newest Episode</title>
+          <enclosure url="https://cdn.example.com/ep42.mp3" type="audio/mpeg" />
+        </item>
+        <item>
+          <title>Older Episode</title>
+          <enclosure url="https://cdn.example.com/ep41.mp3" type="audio/mpeg" />
+        </item>
+      </channel>
+    </rss>"""
+    episode = p._episode_from_feed(rss, "https://example.com/feed.xml")
+    assert episode == ("https://cdn.example.com/ep42.mp3", "Newest Episode", None)
+
+    parser = _DiscoveryParser()
+    parser.feed("""
+      <html><head>
+        <title>Episode page</title>
+        <link rel="alternate" type="application/rss+xml" href="/feed.xml">
+        <meta property="og:audio" content="https://cdn.example.com/direct.mp3">
+      </head></html>
+    """)
+    assert parser.title == "Episode page"
+    assert parser.feed_urls == ["/feed.xml"]
+    assert parser.audio_urls == ["https://cdn.example.com/direct.mp3"]
+
+
+def test_pdf_ocr_runtime_and_language_selection():
+    from types import SimpleNamespace
+    from link_reader.processors.pdf import PDFProcessor
+
+    p = PDFProcessor(SimpleNamespace(max_ocr_pages=80))
+    assert p._ocr_available()
+    langs = p._ocr_languages().split("+")
+    assert "eng" in langs
+    # The production image has Hebrew OCR installed; keeping this assertion
+    # protects the product's Hebrew-first requirement.
+    assert "heb" in langs
+    assert p.min_text_chars_per_page >= 40
+    assert p.default_max_ocr_pages <= 100
+
+
+def test_reddit_processor_parses_post_and_nested_comments():
+    from types import SimpleNamespace
+    from link_reader.processors.reddit import RedditProcessor
+
+    p = RedditProcessor(SimpleNamespace())
+    assert p.supports("https://www.reddit.com/r/test/comments/abc123/example/")
+    assert p.supports("https://redd.it/abc123")
+    assert not p.supports("https://example.com/r/test/comments/abc123")
+    assert p.external_id("https://www.reddit.com/r/test/comments/abc123/example/") == "abc123"
+
+    payload = [
+        {"data": {"children": [{"data": {
+            "title": "Example title",
+            "selftext": "Post body",
+            "author": "poster",
+            "subreddit_name_prefixed": "r/test",
+        }}]}},
+        {"data": {"children": [
+            {"kind": "t1", "data": {
+                "author": "alice", "body": "First comment",
+                "replies": {"data": {"children": [
+                    {"kind": "t1", "data": {"author": "bob", "body": "Nested reply", "replies": ""}}
+                ]}},
+            }},
+            {"kind": "more", "data": {}},
+        ]}},
+    ]
+    post, comments = p._parse_payload(payload)
+    assert post["title"] == "Example title"
+    assert [c["body"] for c in comments] == ["First comment", "Nested reply"]

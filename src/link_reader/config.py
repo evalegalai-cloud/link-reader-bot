@@ -23,6 +23,7 @@ class Settings:
     supadata_api_key: str | None
     supadata_mode: str
     max_video_minutes: int
+    max_ocr_pages: int
     target_language: str
 
     @classmethod
@@ -53,6 +54,7 @@ class Settings:
             supadata_api_key=os.getenv("SUPADATA_API_KEY") or None,
             supadata_mode=os.getenv("SUPADATA_MODE", "native").strip().lower(),
             max_video_minutes=int(os.getenv("MAX_VIDEO_MINUTES", "360")),
+            max_ocr_pages=int(os.getenv("MAX_OCR_PAGES", "80")),
             target_language=os.getenv("TARGET_LANGUAGE", "Hebrew").strip() or "Hebrew",
         )
 

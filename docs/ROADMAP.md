@@ -32,7 +32,7 @@ Validation (2026-09-28):
 - Text PDFs via pypdf ✅
 - Page provenance `[p.N]` ✅
 - Summary, conversational Q&A, export, translation ✅
-- OCR only for scanned pages — pending
+- OCR fallback for scanned pages (Hebrew + English, bounded) ✅
 - EPUB — next
 
 ## Stage 5 — Podcasts / audio 🚧
@@ -40,13 +40,14 @@ Validation (2026-09-28):
 - Direct MP3/M4A/WAV/OGG/etc. ✅
 - Supadata transcription first; local faster-whisper fallback ✅
 - Timestamps, summary, Q&A, translation ✅
-- RSS / podcast-page discovery — next
+- RSS / podcast-page discovery ✅
 - Diarization later
 
 ## Stage 6 — Social sources 🚧
 - Public TikTok / Instagram / X / Facebook video transcription via Supadata ✅
 - Summary, conversational Q&A, translation ✅
-- Reddit and text-only social posts — next
+- Reddit text posts + comment threads ✅
+- X/Twitter text-only posts — access-dependent / experimental
 - LinkedIn — access-dependent
 
 ## Stage 7 — WhatsApp 🚧

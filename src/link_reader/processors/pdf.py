@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
-from pathlib import PurePosixPath
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -17,10 +20,14 @@ class PDFProcessor:
     source_type = "pdf"
     max_bytes = 30 * 1024 * 1024
     max_pages = 1200
+    min_text_chars_per_page = 80
+    default_max_ocr_pages = 80
+    ocr_dpi = 180
 
     def __init__(self, settings):
         self.settings = settings
         self._web_safety = WebPageProcessor(settings)
+        self._ocr_languages_cache: str | None = None
 
     def supports(self, url: str) -> bool:
         try:
@@ -51,18 +58,45 @@ class PDFProcessor:
         if len(reader.pages) > self.max_pages:
             raise ValueError("ה-PDF ארוך מדי לעיבוד כרגע.")
 
-        segments: list[TranscriptSegment] = []
-        nonempty_pages = 0
-        total_chars = 0
+        page_texts: list[str] = []
+        ocr_candidates: list[int] = []
         for page_no, page in enumerate(reader.pages, start=1):
             try:
                 text = (page.extract_text() or "").strip()
             except Exception:
                 text = ""
             text = self._clean_page(text)
+            page_texts.append(text)
+            if len(text) < self.min_text_chars_per_page:
+                ocr_candidates.append(page_no)
+
+        ocr_used = False
+        if ocr_candidates:
+            max_ocr_pages = int(getattr(self.settings, "max_ocr_pages", self.default_max_ocr_pages))
+            # OCR is deliberately bounded so a large scanned book cannot pin the
+            # bot for hours. Text-layer pages remain available regardless.
+            if len(ocr_candidates) > max_ocr_pages and sum(map(len, page_texts)) < 120:
+                raise ValueError(
+                    f"ה-PDF סרוק ודורש OCR ל-{len(ocr_candidates)} עמודים; "
+                    f"המגבלה כרגע היא {max_ocr_pages} עמודים."
+                )
+            if self._ocr_available():
+                for page_no in ocr_candidates[:max_ocr_pages]:
+                    try:
+                        ocr_text = self._ocr_page(data, page_no)
+                    except Exception:
+                        continue
+                    ocr_text = self._clean_page(ocr_text)
+                    idx = page_no - 1
+                    if len(ocr_text) > len(page_texts[idx]):
+                        page_texts[idx] = ocr_text
+                        ocr_used = True
+
+        segments: list[TranscriptSegment] = []
+        total_chars = 0
+        for page_no, text in enumerate(page_texts, start=1):
             if not text:
                 continue
-            nonempty_pages += 1
             total_chars += len(text)
             for part in self._split_page(text):
                 segments.append(
@@ -75,7 +109,11 @@ class PDFProcessor:
                 )
 
         if not segments or total_chars < 120:
-            raise ValueError("ה-PDF כנראה סרוק ואין בו שכבת טקסט מספקת. OCR יתווסף בהמשך.")
+            if not self._ocr_available():
+                raise ValueError(
+                    "ה-PDF כנראה סרוק ואין בו שכבת טקסט מספקת, ו-OCR אינו זמין בשרת."
+                )
+            raise ValueError("לא הצלחתי לחלץ מספיק טקסט מה-PDF גם לאחר OCR.")
 
         metadata = reader.metadata or {}
         title = str(getattr(metadata, "title", "") or "").strip()
@@ -93,8 +131,74 @@ class PDFProcessor:
             duration_seconds=None,
             language=None,
             segments=segments,
-            extraction_method="pypdf",
+            extraction_method="pypdf+ocr" if ocr_used else "pypdf",
         )
+
+    def _ocr_available(self) -> bool:
+        return bool(shutil.which("pdftoppm") and shutil.which("tesseract"))
+
+    def _ocr_languages(self) -> str:
+        if self._ocr_languages_cache:
+            return self._ocr_languages_cache
+        preferred = ["heb", "eng"]
+        available: set[str] = set()
+        try:
+            result = subprocess.run(
+                ["tesseract", "--list-langs"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            )
+            available = {
+                line.strip()
+                for line in (result.stdout + "\n" + result.stderr).splitlines()
+                if line.strip() and "List of available" not in line
+            }
+        except Exception:
+            available = {"eng"}
+        selected = [lang for lang in preferred if lang in available]
+        self._ocr_languages_cache = "+".join(selected) if selected else "eng"
+        return self._ocr_languages_cache
+
+    def _ocr_page(self, pdf_data: bytes, page_no: int) -> str:
+        with tempfile.TemporaryDirectory(prefix="link-reader-ocr-") as tmp:
+            tmpdir = Path(tmp)
+            pdf_path = tmpdir / "source.pdf"
+            out_prefix = tmpdir / "page"
+            image_path = tmpdir / "page.png"
+            pdf_path.write_bytes(pdf_data)
+            subprocess.run(
+                [
+                    "pdftoppm",
+                    "-f", str(page_no),
+                    "-l", str(page_no),
+                    "-singlefile",
+                    "-r", str(self.ocr_dpi),
+                    "-png",
+                    str(pdf_path),
+                    str(out_prefix),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
+            result = subprocess.run(
+                [
+                    "tesseract",
+                    str(image_path),
+                    "stdout",
+                    "-l", self._ocr_languages(),
+                    "--psm", "3",
+                    "-c", "preserve_interword_spaces=1",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=90,
+                check=True,
+            )
+            return result.stdout
 
     def _fetch_pdf(self, url: str) -> tuple[str, bytes]:
         current = url
