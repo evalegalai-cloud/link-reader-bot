@@ -66,14 +66,25 @@ class LLMClient:
         user: str,
         max_tokens: int = 1800,
         tier: str = "smart",
+        reasoning_effort: str | None = None,
     ) -> str:
         model = self._model_for(tier)
+        # DeepSeek V4 enables expensive thinking by default. Subconscious
+        # currently honors the no-thinking controls on its OpenAI-compatible
+        # endpoint, but not on the Anthropic-compatible endpoint.
+        if reasoning_effort == "none" and "deepseek" in model.lower():
+            return await self._openai_compatible(
+                system, user, max_tokens, model, reasoning_effort="none"
+            )
         if self.provider == "anthropic":
             return await self._anthropic(system, user, max_tokens, model)
-        return await self._openai_compatible(system, user, max_tokens, model)
+        return await self._openai_compatible(
+            system, user, max_tokens, model, reasoning_effort=reasoning_effort
+        )
 
     async def _openai_compatible(
-        self, system: str, user: str, max_tokens: int, model: str
+        self, system: str, user: str, max_tokens: int, model: str,
+        reasoning_effort: str | None = None,
     ) -> str:
         if not self.base_url:
             raise RuntimeError("LLM_BASE_URL is required for openai_compatible provider")
@@ -92,6 +103,9 @@ class LLMClient:
             "temperature": 0.2,
             "max_tokens": max_tokens,
         }
+        if reasoning_effort == "none" and "deepseek" in model.lower():
+            payload["thinking"] = {"type": "disabled"}
+            payload["reasoning_effort"] = "none"
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()

@@ -95,8 +95,8 @@ class TelegramBot:
         async with self._locks[user_id]:
             started = time.monotonic()
             status = await update.effective_message.reply_text(
-                "קיבלתי. בסרטון חדש העיבוד בדרך כלל לוקח בערך 1–3 דקות, "
-                "בהתאם לאורך הסרטון. בסיום אציג גם את זמן העיבוד המדויק."
+                "קיבלתי. בסרטון קצר או בינוני העיבוד בדרך כלל לוקח בערך 10–30 שניות; "
+                "סרטונים ארוכים במיוחד עשויים לקחת יותר. בסיום אציג את הזמן המדויק."
             )
             try:
                 content, cached = await self.service.ingest(url, user_id)
@@ -147,7 +147,7 @@ class TelegramBot:
             return await self._deny(update)
         user_id = update.effective_user.id
         async with self._locks[user_id]:
-            status = await update.effective_message.reply_text("מכין תרגום מלא לעברית ללא חותמות זמן… בסרטון ארוך זה עשוי לקחת כמה דקות.")
+            status = await update.effective_message.reply_text("מכין תרגום מלא לעברית ללא חותמות זמן… בדרך כלל זה לוקח עשרות שניות.")
             try:
                 filename, text = await self.service.translate_current(user_id)
                 data = io.BytesIO(text.encode("utf-8"))

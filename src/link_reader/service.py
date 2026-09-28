@@ -10,11 +10,12 @@ MAP_SYSTEM = """Create a faithful content map from the transcript excerpt.
 Use only the transcript. Do not add external knowledge or guess.
 Write 3–8 concise points and preserve useful timestamps from the source.
 When the target output is Hebrew, preserve important foreign proper names, technical terms, titles, Latin/Greek expressions, and other terms whose original spelling matters by including the original-language form in parentheses on first meaningful occurrence.
-The map will later be used to route follow-up questions to the right excerpt."""
-FINAL_SYSTEM = """Summarize the video faithfully from the supplied content map.
+Finish with the exact marker [[END_OF_MAP]] on a line by itself."""
+FINAL_SYSTEM = """Summarize the video faithfully from the supplied source.
 Do not add facts that are not present in the source.
 Clearly distinguish the speaker's claims, opinions, and predictions from established facts.
 Structure the answer as: one-line takeaway, key points, and a timestamped timeline.
+Cover the video from beginning to end, not only the final section.
 When writing in Hebrew, on the first meaningful occurrence of an important foreign proper name, technical term, title, Latin/Greek expression, or term whose original spelling matters, include the original-language form in parentheses after the Hebrew form. Do this selectively, not for ordinary words.
 Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold.
 Finish the response with the exact marker [[END_OF_SUMMARY]] on a line by itself."""
@@ -24,11 +25,11 @@ When possible, cite the exact timestamp as [MM:SS] or [HH:MM:SS].
 If the excerpts do not support an answer, say so clearly instead of guessing.
 When answering in Hebrew, on the first meaningful occurrence of an important foreign proper name, technical term, title, Latin/Greek expression, or term whose original spelling matters, include the original-language form in parentheses after the Hebrew form. Do this selectively, not for ordinary words.
 Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold."""
-TRANSLATE_SYSTEM = """Translate the supplied transcript passage completely and faithfully.
-Translate every sentence. Do not summarize, shorten, skip, or reorder material.
-The input has no timestamps; do not add timestamps or time references of your own.
-When translating into Hebrew, preserve important foreign proper names, technical terms, titles, and Latin/Greek expressions in their original-language form in parentheses on first meaningful occurrence.
-Finish with the exact marker [[END_OF_TRANSLATION_PART]] on a line by itself."""
+TRANSLATE_SYSTEM = """Translate every supplied segment completely and faithfully into the target language.
+Do not summarize, shorten, merge, skip, or reorder segments.
+Each input segment starts with an internal ID like [S000001]. Preserve every ID exactly once and in the same order.
+Do not add timestamps.
+When translating into Hebrew, preserve important foreign proper names, technical terms, titles, and Latin/Greek expressions in their original-language form in parentheses where useful."""
 
 
 class ContentService:
@@ -65,51 +66,41 @@ class ContentService:
         else:
             content_id = self.db.save_content(item, transcript)
 
+        chunks = self._chunk_segments(item.segments)
+        # Persist raw chunks immediately. Maps are generated only when a long
+        # source actually needs retrieval, instead of slowing every ingest.
+        self.db.replace_chunks(content_id, chunks)
+
         usage_token, usage_tracker = self.llm.start_usage_tracking()
         try:
-            chunks = self._chunk_segments(item.segments)
-            semaphore = asyncio.Semaphore(3)
-
-            async def summarize_chunk(chunk):
-                async with semaphore:
-                    chunk["map_summary"] = await self.llm.complete(
-                        MAP_SYSTEM + f"\nTarget output language: {self.target_language}.",
-                        f"Excerpt {chunk['ordinal']}:\n\n{chunk['text']}",
-                        max_tokens=4000,
-                        tier="fast",
-                    )
-                    return chunk
-
-            chunks = await asyncio.gather(*(summarize_chunk(c) for c in chunks))
-            self.db.replace_chunks(content_id, chunks)
-
-            maps = "\n\n".join(
-                f"Chunk {c['ordinal']} ({format_timestamp(c['start_seconds'])}–"
-                f"{format_timestamp(c['end_seconds'])}):\n{c['map_summary']}"
-                for c in chunks
-            )
-            final_prompt = (
-                f"Title: {item.title}\nCreator/channel: {item.author or 'Unknown'}\n\n{maps}"
-            )
-            summary = await self.llm.complete(
-                FINAL_SYSTEM + f"\nTarget output language: {self.target_language}.",
-                final_prompt,
-                max_tokens=7000,
-                tier="smart",
-            )
-            marker = "[[END_OF_SUMMARY]]"
-            if marker not in summary:
-                summary = await self.llm.complete(
+            if len(transcript) <= 80_000:
+                final_prompt = (
+                    f"Title: {item.title}\nCreator/channel: {item.author or 'Unknown'}"
+                    f"\n\nFull timestamped transcript:\n{transcript}"
+                )
+                final_system = (
                     FINAL_SYSTEM
                     + f"\nTarget output language: {self.target_language}."
-                    + "\nIMPORTANT: the previous generation was truncated. Produce the complete summary from scratch and do not stop before the end marker.",
-                    final_prompt,
-                    max_tokens=12000,
-                    tier="smart",
+                    + "\nThe supplied source is the full timestamped transcript."
                 )
-            if marker not in summary:
-                raise RuntimeError("המודל החזיר סיכום לא שלם גם לאחר ניסיון חוזר.")
-            summary = summary.split(marker, 1)[0].rstrip()
+            else:
+                mapped = await self._ensure_maps(content_id, self.db.get_chunks(content_id))
+                maps = self._maps_text(mapped)
+                final_prompt = (
+                    f"Title: {item.title}\nCreator/channel: {item.author or 'Unknown'}"
+                    f"\n\nComplete content map:\n{maps}"
+                )
+                final_system = (
+                    FINAL_SYSTEM
+                    + f"\nTarget output language: {self.target_language}."
+                    + "\nThe supplied source is a complete timestamped content map covering the full transcript."
+                )
+
+            summary = await self._complete_checked(
+                final_system, final_prompt, "[[END_OF_SUMMARY]]",
+                first_budget=6000, retry_budget=8000, tier="smart",
+                label="סיכום",
+            )
             self.db.set_summary(content_id, summary)
         finally:
             self.llm.stop_usage_tracking(usage_token)
@@ -119,10 +110,6 @@ class ContentService:
         output_tokens = sum(v.get("output_tokens", 0) for v in by_model.values())
         cached_input_tokens = sum(v.get("cached_input_tokens", 0) for v in by_model.values())
         llm_cost = self.llm.estimate_usage_cost_usd(usage_tracker)
-
-        # Supadata native transcript = 1 credit. We use $0.01/credit as a
-        # conservative API-equivalent reference (paid auto-recharge rate);
-        # actual billed cost can be $0 when covered by included credits.
         transcript_credits = 1.0 if item.extraction_method == "supadata_transcript" else 0.0
         transcript_cost = transcript_credits * 0.01
         self.db.set_processing_stats(
@@ -136,6 +123,56 @@ class ContentService:
         )
         self.db.set_current_content(user_id, content_id)
         return self.db.get_content(content_id), False
+
+    async def _complete_checked(
+        self, system: str, prompt: str, marker: str, *,
+        first_budget: int, retry_budget: int, tier: str, label: str,
+    ) -> str:
+        result = await self.llm.complete(
+            system, prompt, max_tokens=first_budget, tier=tier, reasoning_effort="none"
+        )
+        if marker not in result:
+            result = await self.llm.complete(
+                system
+                + f"\nIMPORTANT: the previous {label} was incomplete. Produce it again in full and finish with the required end marker.",
+                prompt,
+                max_tokens=retry_budget,
+                tier=tier,
+                reasoning_effort="none",
+            )
+        if marker not in result:
+            raise RuntimeError(f"המודל החזיר {label} לא שלם גם לאחר ניסיון חוזר.")
+        return result.split(marker, 1)[0].rstrip()
+
+    def _maps_text(self, chunks) -> str:
+        return "\n\n".join(
+            f"Chunk {c['ordinal']} ({format_timestamp(c['start_seconds'])}–"
+            f"{format_timestamp(c['end_seconds'])}):\n{c['map_summary'] or ''}"
+            for c in chunks
+        )
+
+    async def _ensure_maps(self, content_id: int, chunks):
+        items = [dict(c) for c in chunks]
+        missing = [c for c in items if not (c.get("map_summary") or "").strip()]
+        if not missing:
+            return chunks
+
+        semaphore = asyncio.Semaphore(6)
+        marker = "[[END_OF_MAP]]"
+
+        async def map_one(chunk):
+            async with semaphore:
+                system = MAP_SYSTEM + f"\nTarget output language: {self.target_language}."
+                prompt = f"Excerpt {chunk['ordinal']}:\n\n{chunk['text']}"
+                mapped = await self._complete_checked(
+                    system, prompt, marker, first_budget=1800, retry_budget=2600,
+                    tier="fast", label="מפת תוכן",
+                )
+                chunk["map_summary"] = mapped
+
+        await asyncio.gather(*(map_one(c) for c in missing))
+        self.db.replace_chunks(content_id, items)
+        return self.db.get_chunks(content_id)
 
     def _chunk_segments(self, segments, target_chars: int = 12000):
         chunks = []
@@ -181,7 +218,7 @@ class ContentService:
             raise RuntimeError("לא נמצאו מקטעים שמורים לסרטון.")
 
         total_chars = sum(len(c["text"]) for c in chunks)
-        if total_chars <= 55000:
+        if total_chars <= 55_000:
             selected = list(chunks)
         else:
             selected = await self._select_chunks(question, chunks)
@@ -200,19 +237,33 @@ class ContentService:
             f"Previous Q&A context (only for resolving references):\n{history_text or 'None'}\n\n"
             f"Transcript excerpts:\n{evidence}"
         )
-        answer = await self.llm.complete(QA_SYSTEM + f"\nDefault answer language: {self.target_language}, unless the user explicitly asks for another language.", prompt, max_tokens=5000, tier="smart")
+        lower = question.lower()
+        detailed = any(x in lower for x in ("מפורט", "בהרחבה", "לעומק", "detailed", "comprehensive"))
+        budget = 1600 if detailed else 900
+        answer = await self.llm.complete(
+            QA_SYSTEM
+            + f"\nDefault answer language: {self.target_language}, unless the user explicitly asks for another language."
+            + "\nAnswer directly and avoid repetition. Unless the user asks for detail, lead with the answer and use 3–5 supporting points.",
+            prompt,
+            max_tokens=budget,
+            tier="smart",
+            reasoning_effort="none",
+        )
         self.db.save_qa(user_id, content["id"], question, answer)
         return answer
 
     async def _select_chunks(self, question: str, chunks):
+        if any(not (c["map_summary"] or "").strip() for c in chunks):
+            chunks = await self._ensure_maps(chunks[0]["content_id"], chunks)
         index = "\n\n".join(
             f"Chunk {c['ordinal']}: {c['map_summary'] or ''}" for c in chunks
         )
         routing = await self.llm.complete(
             "Select up to 6 transcript chunks most relevant to the question. Return only chunk numbers separated by commas.",
             f"Question: {question}\n\nContent map:\n{index}",
-            max_tokens=3500,
+            max_tokens=64,
             tier="fast",
+            reasoning_effort="none",
         )
         wanted = []
         for num in re.findall(r"\d+", routing):
@@ -233,57 +284,72 @@ class ContentService:
         if not chunks:
             raise RuntimeError("לא נמצאו מקטעים שמורים לסרטון.")
 
-        parts = self._translation_parts(chunks)
-        marker = "[[END_OF_TRANSLATION_PART]]"
-        semaphore = asyncio.Semaphore(6)
+        parts = self._translation_parts(chunks, target_chars=1800)
+        semaphore = asyncio.Semaphore(8)
+        system = TRANSLATE_SYSTEM + f"\nTranslate into: {self.target_language}."
 
-        async def translate_part(index: int, part: str) -> str:
-            system = TRANSLATE_SYSTEM + f"\nTranslate into: {self.target_language}."
-            prompt = part
+        async def translate_units(units, depth: int = 0) -> str:
+            source = "\n".join(f"[{sid}] {text}" for sid, text in units)
+            expected = [sid for sid, _ in units]
             async with semaphore:
                 result = await self.llm.complete(
-                    system, prompt, max_tokens=8000, tier="fast"
+                    system, source, max_tokens=2800, tier="fast", reasoning_effort="none"
                 )
-                if marker not in result:
-                    result = await self.llm.complete(
+            found = ["S" + x for x in re.findall(r"\[S(\d{6})\]", result)]
+            if found == expected:
+                return re.sub(r"\[S\d{6}\]\s*", "", result).strip()
+
+            if len(units) <= 1 or depth >= 4:
+                # One strict retry for a single stubborn unit.
+                async with semaphore:
+                    retry = await self.llm.complete(
                         system
-                        + "\nIMPORTANT: the previous translation was truncated. Translate this entire part again and do not stop before the end marker.",
-                        prompt,
-                        max_tokens=12000,
+                        + "\nCRITICAL: preserve the single segment ID exactly and translate every word.",
+                        source,
+                        max_tokens=1400,
                         tier="fast",
+                        reasoning_effort="none",
                     )
-                if marker not in result:
-                    raise RuntimeError(
-                        f"התרגום נקטע בחלק {index + 1} גם לאחר ניסיון חוזר."
-                    )
-                return result.split(marker, 1)[0].rstrip()
+                retry_found = ["S" + x for x in re.findall(r"\[S(\d{6})\]", retry)]
+                if retry_found != expected:
+                    raise RuntimeError("חלק מהתרגום לא עבר בדיקת שלמות גם לאחר ניסיון חוזר.")
+                return re.sub(r"\[S\d{6}\]\s*", "", retry).strip()
 
-        translated = await asyncio.gather(
-            *(translate_part(i, part) for i, part in enumerate(parts))
-        )
+            mid = len(units) // 2
+            left, right = await asyncio.gather(
+                translate_units(units[:mid], depth + 1),
+                translate_units(units[mid:], depth + 1),
+            )
+            return left + "\n" + right
+
+        translated = await asyncio.gather(*(translate_units(part) for part in parts))
+        text = "\n\n".join(translated)
         safe_title = re.sub(r"[^\w\- ]+", "", content["title"], flags=re.UNICODE).strip()[:70]
-        return (safe_title or "youtube") + "-translated.txt", "\n\n".join(translated)
+        return (safe_title or "youtube") + "-translated.txt", text
 
-    def _translation_parts(self, chunks, target_chars: int = 2000) -> list[str]:
-        lines = []
+    def _translation_parts(self, chunks, target_chars: int = 1800):
+        units = []
+        ordinal = 1
         for chunk in chunks:
             for raw in chunk["text"].splitlines():
                 clean = re.sub(r"^\[[0-9:]+\]\s*", "", raw).strip()
                 if clean:
-                    lines.append(clean)
+                    units.append((f"S{ordinal:06d}", clean))
+                    ordinal += 1
 
         parts = []
         current = []
         chars = 0
-        for line in lines:
-            if current and chars + len(line) + 1 > target_chars:
-                parts.append("\n".join(current))
+        for sid, text in units:
+            line_len = len(sid) + len(text) + 4
+            if current and chars + line_len > target_chars:
+                parts.append(current)
                 current = []
                 chars = 0
-            current.append(line)
-            chars += len(line) + 1
+            current.append((sid, text))
+            chars += line_len
         if current:
-            parts.append("\n".join(current))
+            parts.append(current)
         return parts
 
     def transcript_current(self, user_id: int) -> tuple[str, str]:

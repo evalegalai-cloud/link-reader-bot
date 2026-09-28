@@ -159,10 +159,11 @@ class YouTubeProcessor:
     def _supadata_key(self) -> str | None:
         if self.settings.supadata_api_key:
             return self.settings.supadata_api_key
-        path = Path("/data/supadata.key")
-        if path.exists():
-            value = path.read_text(encoding="utf-8").strip()
-            return value or None
+        for path in (Path("/data/supadata.key"), Path("data/supadata.key")):
+            if path.exists():
+                value = path.read_text(encoding="utf-8").strip()
+                if value:
+                    return value
         return None
 
     def _supadata_captions(self, url: str):
