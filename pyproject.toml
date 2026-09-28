@@ -15,6 +15,7 @@ dependencies = [
   "fonttools>=4,<5",
   "fastapi>=0.116,<1",
   "uvicorn>=0.35,<1",
+  "twilio>=9,<10",
 ]
 
 [project.optional-dependencies]

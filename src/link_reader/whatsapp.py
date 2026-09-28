@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
+from twilio.request_validator import RequestValidator
 
 from link_reader.config import Settings
 from link_reader.db import Database
@@ -137,6 +138,43 @@ class WhatsAppConfig:
     def sender_allowed(self, wa_id: str) -> bool:
         sender = re.sub(r"\D", "", wa_id or "")
         return bool(sender and self.allowed_numbers and sender in self.allowed_numbers)
+
+
+@dataclass
+class TwilioWhatsAppConfig:
+    account_sid: str
+    auth_token: str
+    from_number: str
+    allowed_numbers: frozenset[str]
+
+    @classmethod
+    def from_env(cls):
+        allowed_raw = os.getenv("TWILIO_ALLOWED_NUMBERS", "").strip()
+        allowed = frozenset(
+            normalized
+            for raw in allowed_raw.split(",")
+            if (normalized := re.sub(r"\D", "", raw))
+        )
+        from_number = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
+        if from_number and not from_number.startswith("whatsapp:"):
+            digits = re.sub(r"\D", "", from_number)
+            from_number = f"whatsapp:+{digits}" if digits else ""
+        return cls(
+            account_sid=os.getenv("TWILIO_ACCOUNT_SID", "").strip(),
+            auth_token=os.getenv("TWILIO_AUTH_TOKEN", "").strip(),
+            from_number=from_number,
+            allowed_numbers=allowed,
+        )
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.account_sid and self.auth_token)
+
+    def sender_allowed(self, wa_id: str) -> bool:
+        sender = re.sub(r"\D", "", wa_id or "")
+        return bool(sender and (not self.allowed_numbers or sender in self.allowed_numbers))
+
+
 
 
 class WhatsAppGateway:
@@ -421,6 +459,89 @@ class WhatsAppGateway:
         return f"{minutes}:{secs:02d} דק׳"
 
 
+class TwilioWhatsAppGateway(WhatsAppGateway):
+    """Twilio transport adapter reusing the same Link Reader WhatsApp logic."""
+
+    def __init__(self, service: ContentService, settings: Settings):
+        self.config = TwilioWhatsAppConfig.from_env()
+        self.service = service
+        self.settings = settings
+        self._locks: dict[int, asyncio.Lock] = {}
+        self._runtime_from = self.config.from_number
+
+    def set_from_number(self, value: str) -> None:
+        value = (value or "").strip()
+        if value and not value.startswith("whatsapp:"):
+            digits = re.sub(r"\D", "", value)
+            value = f"whatsapp:+{digits}" if digits else ""
+        if value:
+            self._runtime_from = value
+
+    def verify_request(self, url: str, params: dict[str, str], signature: str | None) -> bool:
+        if not self.config.auth_token or not signature:
+            return False
+        try:
+            return bool(RequestValidator(self.config.auth_token).validate(url, params, signature))
+        except Exception:
+            return False
+
+    async def send_text(self, to: str, text: str) -> None:
+        if not self.config.configured:
+            raise RuntimeError("Twilio WhatsApp is not configured")
+        from_number = self._runtime_from or self.config.from_number
+        if not from_number:
+            raise RuntimeError("Twilio WhatsApp sender is unknown")
+        digits = re.sub(r"\D", "", to or "")
+        if not digits:
+            raise ValueError("Invalid WhatsApp recipient")
+        url = (
+            f"https://api.twilio.com/2010-04-01/Accounts/"
+            f"{self.config.account_sid}/Messages.json"
+        )
+        async with httpx.AsyncClient(
+            auth=(self.config.account_sid, self.config.auth_token),
+            timeout=30,
+        ) as client:
+            for chunk in self._split(text, limit=1500):
+                response = await client.post(
+                    url,
+                    data={
+                        "From": from_number,
+                        "To": f"whatsapp:+{digits}",
+                        "Body": chunk,
+                    },
+                )
+                response.raise_for_status()
+
+    async def download_media(self, media_id: str) -> tuple[Path, str]:
+        if not media_id.startswith(("https://", "http://")):
+            raise ValueError("Invalid Twilio media URL")
+        async with httpx.AsyncClient(
+            auth=(self.config.account_sid, self.config.auth_token),
+            timeout=httpx.Timeout(60.0, connect=10.0),
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(media_id)
+            response.raise_for_status()
+        if len(response.content) > 50 * 1024 * 1024:
+            raise ValueError("קובץ האודיו גדול מדי.")
+        mime = (response.headers.get("content-type") or "application/octet-stream").split(";", 1)[0].strip()
+        suffix = {
+            "audio/ogg": ".ogg",
+            "audio/mpeg": ".mp3",
+            "audio/mp4": ".m4a",
+            "audio/aac": ".aac",
+            "audio/amr": ".amr",
+            "audio/wav": ".wav",
+        }.get(mime.lower()) or mimetypes.guess_extension(mime) or ".bin"
+        tmpdir = Path(tempfile.mkdtemp(prefix="link-reader-twilio-wa-"))
+        path = tmpdir / ("media" + suffix)
+        path.write_bytes(response.content)
+        return path, mime
+
+
+
+
 gateway = WhatsAppGateway()
 app = FastAPI(title="Link Reader WhatsApp", docs_url=None, redoc_url=None)
 
@@ -563,3 +684,77 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="Invalid JSON") from exc
     background_tasks.add_task(gateway.handle_payload, payload)
     return {"ok": True}
+
+
+twilio_gateway = TwilioWhatsAppGateway(gateway.service, gateway.settings)
+
+
+def _twiml_empty() -> Response:
+    return Response(
+        content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+        media_type="application/xml",
+    )
+
+
+@app.post("/twilio/whatsapp")
+async def receive_twilio_whatsapp(request: Request, background_tasks: BackgroundTasks):
+    body = await request.body()
+    params_multi = parse_qs(body.decode("utf-8", errors="ignore"), keep_blank_values=True)
+    params = {key: values[-1] for key, values in params_multi.items() if values}
+
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
+    host = request.headers.get("host") or request.url.netloc
+    signed_url = f"{forwarded_proto}://{host}{request.url.path}"
+    if request.url.query:
+        signed_url += "?" + request.url.query
+
+    if not twilio_gateway.verify_request(
+        signed_url,
+        params,
+        request.headers.get("x-twilio-signature"),
+    ):
+        raise HTTPException(status_code=401, detail="Invalid Twilio signature")
+
+    if params.get("AccountSid") and params.get("AccountSid") != twilio_gateway.config.account_sid:
+        raise HTTPException(status_code=403, detail="Wrong Twilio account")
+
+    event_id = params.get("MessageSid") or params.get("SmsMessageSid") or ""
+    if event_id and not gateway.service.db.claim_webhook_event("twilio_whatsapp", event_id):
+        return _twiml_empty()
+
+    twilio_gateway.set_from_number(params.get("To", ""))
+    sender = re.sub(r"\D", "", params.get("From", ""))
+    if not sender or not twilio_gateway.config.sender_allowed(sender):
+        return _twiml_empty()
+
+    num_media = int(params.get("NumMedia") or "0")
+    media_url = params.get("MediaUrl0", "") if num_media else ""
+    media_type = params.get("MediaContentType0", "") if num_media else ""
+    if media_url and media_type.lower().startswith("audio/"):
+        message = {
+            "from": sender,
+            "type": "audio",
+            "audio": {
+                "id": media_url,
+                "mime_type": media_type,
+                "voice": True,
+            },
+        }
+    else:
+        message = {
+            "from": sender,
+            "type": "text",
+            "text": {"body": params.get("Body", "")},
+        }
+
+    background_tasks.add_task(twilio_gateway.handle_message, message)
+    return _twiml_empty()
+
+
+@app.get("/twilio/whatsapp/health")
+async def twilio_whatsapp_health():
+    return {
+        "ok": True,
+        "configured": twilio_gateway.config.configured,
+        "sender_known": bool(twilio_gateway._runtime_from),
+    }

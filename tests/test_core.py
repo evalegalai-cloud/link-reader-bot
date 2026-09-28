@@ -421,3 +421,39 @@ def test_pasted_article_becomes_new_text_source():
 
     long_question = "שאלה: " + ("תסביר לי לעומק את הטענה הזאת ואת ההקשר שלה. " * 40)
     assert service.looks_like_pasted_source(long_question) is False
+
+def test_twilio_whatsapp_signature_and_allowlist():
+    from twilio.request_validator import RequestValidator
+    from link_reader.whatsapp import TwilioWhatsAppConfig, TwilioWhatsAppGateway
+
+    config = TwilioWhatsAppConfig(
+        account_sid="AC" + "1" * 32,
+        auth_token="secret-token",
+        from_number="whatsapp:+14155238886",
+        allowed_numbers=frozenset({"15551234567"}),
+    )
+    gateway = object.__new__(TwilioWhatsAppGateway)
+    gateway.config = config
+
+    url = "https://transcribe.evalegalai.com/twilio/whatsapp"
+    params = {
+        "AccountSid": config.account_sid,
+        "From": "whatsapp:+15551234567",
+        "To": "whatsapp:+14155238886",
+        "Body": "hello",
+        "NumMedia": "0",
+    }
+    signature = RequestValidator(config.auth_token).compute_signature(url, params)
+
+    assert gateway.verify_request(url, params, signature)
+    assert not gateway.verify_request(url, params, "invalid")
+    assert config.sender_allowed("whatsapp:+1 555-123-4567")
+    assert not config.sender_allowed("whatsapp:+1 555-987-6543")
+
+    open_config = TwilioWhatsAppConfig(
+        account_sid=config.account_sid,
+        auth_token=config.auth_token,
+        from_number="",
+        allowed_numbers=frozenset(),
+    )
+    assert open_config.sender_allowed("whatsapp:+972501234567")
