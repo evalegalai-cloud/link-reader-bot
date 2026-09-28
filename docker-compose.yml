@@ -2,9 +2,7 @@ services:
   link-reader-bot:
     build: .
     restart: unless-stopped
-    env_file:
-      - .env
-      - ./data/openrouter.env
+    env_file: .env
     volumes:
       - ./data:/data
       - ./downloads:/tmp/link-reader
