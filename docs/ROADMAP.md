@@ -33,7 +33,7 @@ Validation (2026-09-28):
 - Page provenance `[p.N]` ✅
 - Summary, conversational Q&A, export, translation ✅
 - OCR fallback for scanned pages (Hebrew + English, bounded) ✅
-- EPUB — next
+- EPUB with spine-order chapter provenance ✅
 
 ## Stage 5 — Podcasts / audio 🚧
 - Telegram voice notes + uploaded audio via `gpt-transcribe` ✅

@@ -49,6 +49,7 @@ The example configuration defaults to Hebrew. The practical language coverage de
 - Ordinary web pages and long-form articles via Trafilatura.
 - Article section provenance using `[§N]` references.
 - Public text-PDF links with `[p.N]` page provenance.
+- EPUB books with spine-order `[ch.N]` chapter provenance.
 - Direct audio links (MP3/M4A/WAV/OGG/etc.) with timestamped transcription.
 - Telegram voice notes and uploaded audio; private files use OpenAI `gpt-transcribe`, with local faster-whisper fallback.
 - Public TikTok, Instagram, X, and Facebook video transcription through Supadata.

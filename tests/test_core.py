@@ -289,3 +289,53 @@ def test_reddit_processor_parses_post_and_nested_comments():
     post, comments = p._parse_payload(payload)
     assert post["title"] == "Example title"
     assert [c["body"] for c in comments] == ["First comment", "Nested reply"]
+
+
+def test_epub_spine_order_metadata_and_registry_parity():
+    import io
+    import zipfile
+    from types import SimpleNamespace
+
+    from link_reader.processors import EPUBProcessor, PodcastProcessor, RedditProcessor, build_processors
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+        zf.writestr(
+            "META-INF/container.xml",
+            """<?xml version="1.0"?>
+            <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+              <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+            </container>""",
+        )
+        zf.writestr(
+            "OEBPS/content.opf",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+              <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                <dc:title>ספר בדיקה</dc:title><dc:creator>מחבר בדיקה</dc:creator>
+              </metadata>
+              <manifest>
+                <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+                <item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/>
+              </manifest>
+              <spine><itemref idref="c2"/><itemref idref="c1"/></spine>
+            </package>""",
+        )
+        zf.writestr("OEBPS/c1.xhtml", "<html><body><h1>פרק ראשון</h1><p>" + "א " * 90 + "</p></body></html>")
+        zf.writestr("OEBPS/c2.xhtml", "<html><body><h1>פרק שני</h1><p>" + "ב " * 90 + "</p></body></html>")
+
+    settings = SimpleNamespace()
+    processor = EPUBProcessor(settings)
+    title, author, segments = processor._parse_epub(buffer.getvalue())
+    assert title == "ספר בדיקה"
+    assert author == "מחבר בדיקה"
+    assert segments[0].reference == "ch.1"
+    assert "פרק שני" in segments[0].text
+    assert any(seg.reference == "ch.2" and "פרק ראשון" in seg.text for seg in segments)
+    assert processor.supports("https://example.com/books/test.epub")
+
+    registry = build_processors(settings)
+    assert sum(isinstance(p, EPUBProcessor) for p in registry) == 1
+    assert sum(isinstance(p, PodcastProcessor) for p in registry) == 1
+    assert sum(isinstance(p, RedditProcessor) for p in registry) == 1

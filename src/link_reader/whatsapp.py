@@ -22,13 +22,7 @@ from fastapi.responses import HTMLResponse
 from link_reader.config import Settings
 from link_reader.db import Database
 from link_reader.llm import LLMClient
-from link_reader.processors import (
-    AudioProcessor,
-    PDFProcessor,
-    SocialVideoProcessor,
-    WebPageProcessor,
-    YouTubeProcessor,
-)
+from link_reader.processors import AudioProcessor, build_processors
 from link_reader.service import ContentService
 
 logger = logging.getLogger(__name__)
@@ -154,13 +148,7 @@ class WhatsAppGateway:
         self.service = ContentService(
             db,
             llm,
-            [
-                YouTubeProcessor(settings),
-                PDFProcessor(settings),
-                AudioProcessor(settings),
-                SocialVideoProcessor(settings),
-                WebPageProcessor(settings),
-            ],
+            build_processors(settings),
             target_language=settings.target_language,
         )
         self.settings = settings
