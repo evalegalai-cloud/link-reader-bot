@@ -11,6 +11,8 @@ dependencies = [
   "anthropic>=0.66,<1",
   "python-dotenv>=1.1,<2",
   "trafilatura>=2.2,<3",
+  "pypdf>=6,<7",
+  "fonttools>=4,<5",
 ]
 
 [project.optional-dependencies]

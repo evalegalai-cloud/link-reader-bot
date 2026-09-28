@@ -6,7 +6,7 @@ from link_reader.bot import TelegramBot
 from link_reader.config import Settings
 from link_reader.db import Database
 from link_reader.llm import LLMClient
-from link_reader.processors import WebPageProcessor, YouTubeProcessor
+from link_reader.processors import AudioProcessor, PDFProcessor, SocialVideoProcessor, WebPageProcessor, YouTubeProcessor
 from link_reader.service import ContentService
 
 
@@ -23,7 +23,7 @@ def main() -> None:
 
     db = Database(settings.database_path)
     llm = LLMClient(settings)
-    processors = [YouTubeProcessor(settings), WebPageProcessor(settings)]
+    processors = [YouTubeProcessor(settings), PDFProcessor(settings), AudioProcessor(settings), SocialVideoProcessor(settings), WebPageProcessor(settings)]
     service = ContentService(db, llm, processors, target_language=settings.target_language)
     app = TelegramBot(settings, service).build_application()
 

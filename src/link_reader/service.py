@@ -77,7 +77,8 @@ class ContentService:
         usage_token, usage_tracker = self.llm.start_usage_tracking()
         try:
             if len(transcript) <= 80_000:
-                source_kind = "time-based transcript" if item.source_type == "youtube" else "section-marked document"
+                time_based = item.source_type in {"youtube", "audio", "social_video"}
+                source_kind = "time-based transcript" if time_based else "section/page-marked document"
                 final_prompt = (
                     f"Title: {item.title}\nAuthor/creator: {item.author or 'Unknown'}"
                     f"\nSource type: {item.source_type}\n\nFull source text:\n{transcript}"
@@ -114,7 +115,13 @@ class ContentService:
         output_tokens = sum(v.get("output_tokens", 0) for v in by_model.values())
         cached_input_tokens = sum(v.get("cached_input_tokens", 0) for v in by_model.values())
         llm_cost = self.llm.estimate_usage_cost_usd(usage_tracker)
-        transcript_credits = 1.0 if item.extraction_method == "supadata_transcript" else 0.0
+        if item.extraction_method == "supadata_transcript":
+            transcript_credits = 1.0
+        elif item.extraction_method == "supadata_generated":
+            minutes = max(0.0, float(item.duration_seconds or 0.0)) / 60.0
+            transcript_credits = max(1.0, minutes * 2.0)
+        else:
+            transcript_credits = 0.0
         transcript_cost = transcript_credits * 0.01
         self.db.set_processing_stats(
             content_id,
@@ -388,5 +395,5 @@ class ContentService:
         if not content:
             raise ValueError("שלח קודם קישור.")
         safe_title = re.sub(r"[^\w\- ]+", "", content["title"], flags=re.UNICODE).strip()[:70]
-        suffix = "transcript" if content["source_type"] == "youtube" else "source"
+        suffix = "transcript" if content["source_type"] in {"youtube", "audio", "social_video"} else "source"
         return (safe_title or "content") + f"-{suffix}.txt", content["transcript"]

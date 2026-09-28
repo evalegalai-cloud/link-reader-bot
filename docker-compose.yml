@@ -3,6 +3,8 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    environment:
+      HF_HOME: /data/hf-cache
     volumes:
       - ./data:/data
       - ./downloads:/tmp/link-reader

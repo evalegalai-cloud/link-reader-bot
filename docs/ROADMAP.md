@@ -28,20 +28,25 @@ Validation (2026-09-28):
 - Summary, conversational Q&A, source export, full translation
 - Browser fallback deferred until a real extraction failure justifies it
 
-## Stage 4 — PDFs / books
-- PDF text + page provenance
-- OCR only for scanned pages
-- EPUB later
+## Stage 4 — PDFs / books 🚧
+- Text PDFs via pypdf ✅
+- Page provenance `[p.N]` ✅
+- Summary, conversational Q&A, export, translation ✅
+- OCR only for scanned pages — pending
+- EPUB — next
 
-## Stage 5 — Podcasts / audio
-- RSS/direct audio
-- ASR + timestamps
-- Q&A / translation
+## Stage 5 — Podcasts / audio 🚧
+- Direct MP3/M4A/WAV/OGG/etc. ✅
+- Supadata transcription first; local faster-whisper fallback ✅
+- Timestamps, summary, Q&A, translation ✅
+- RSS / podcast-page discovery — next
 - Diarization later
 
-## Stage 6 — Social sources
-- Reddit / X first
-- LinkedIn / TikTok / Instagram / Facebook as access permits
+## Stage 6 — Social sources 🚧
+- Public TikTok / Instagram / X / Facebook video transcription via Supadata ✅
+- Summary, conversational Q&A, translation ✅
+- Reddit and text-only social posts — next
+- LinkedIn — access-dependent
 
 ## Stage 7 — WhatsApp
 - WhatsApp Business / Cloud API adapter

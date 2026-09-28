@@ -81,3 +81,34 @@ def test_generic_section_references_and_web_url_safety():
             pass
         else:
             raise AssertionError(f"private URL was allowed: {private_url}")
+
+
+def test_pdf_processor_url_and_page_splitting():
+    from types import SimpleNamespace
+    from link_reader.processors.pdf import PDFProcessor
+
+    p = PDFProcessor(SimpleNamespace())
+    assert p.supports("https://example.com/report.pdf")
+    assert p.supports("https://example.com/report.PDF?download=1")
+    assert not p.supports("https://example.com/report.html")
+    parts = p._split_page("word " * 2000, max_chars=1000)
+    assert len(parts) > 1
+    assert all(len(part) <= 1001 for part in parts)
+
+
+def test_audio_and_social_processor_routing():
+    from types import SimpleNamespace
+    from link_reader.processors.audio import AudioProcessor
+    from link_reader.processors.social import SocialVideoProcessor
+
+    settings = SimpleNamespace(asr_mode="local", whisper_model="small", max_video_minutes=360, supadata_api_key=None)
+    audio = AudioProcessor(settings)
+    social = SocialVideoProcessor(settings)
+    assert audio.supports("https://example.com/episode.mp3")
+    assert audio.supports("https://cdn.example.com/audio.m4a?x=1")
+    assert not audio.supports("https://example.com/article")
+    assert social.supports("https://www.instagram.com/reel/ABC123/")
+    assert social.supports("https://vm.tiktok.com/ABC123/")
+    assert social.supports("https://x.com/user/status/123")
+    assert social.supports("https://www.facebook.com/reel/123")
+    assert not social.supports("https://example.com/video")

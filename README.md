@@ -48,6 +48,9 @@ The example configuration defaults to Hebrew. The practical language coverage de
 - YouTube watch, youtu.be, Shorts, Live, and embed URL support.
 - Ordinary web pages and long-form articles via Trafilatura.
 - Article section provenance using `[§N]` references.
+- Public text-PDF links with `[p.N]` page provenance.
+- Direct audio links (MP3/M4A/WAV/OGG/etc.) with timestamped transcription.
+- Public TikTok, Instagram, X, and Facebook video transcription through Supadata.
 - SSRF protection, redirect validation, size limits, and tracking-parameter normalization for web URLs.
 - Existing captions and auto-caption extraction.
 - Optional local Whisper fallback.
@@ -205,14 +208,10 @@ The supplied `.gitignore` excludes the local environment file and runtime data.
 
 The next logical processors are:
 
-- PDFs and uploaded books/documents
-- podcast and audio links
-- X / Twitter
-- Reddit
+- scanned-PDF OCR and uploaded books/documents
+- podcast RSS/page discovery
+- Reddit and text-only social posts
 - LinkedIn
-- TikTok
-- Instagram
-- Facebook
 
 These should remain thin source adapters over the same transcript/content pipeline rather than separate applications.
 
