@@ -109,9 +109,9 @@ class TelegramBot:
                     llm_cost = content["llm_cost_usd"] or 0.0
                     transcript_cost = content["transcript_cost_usd"] or 0.0
                     footer += (
-                        f"\n**עלות API משוערת:** ${cost:.4f} "
+                        f"\n**עלות API משוערת לעיבוד הראשוני:** ${cost:.4f} "
                         f"(LLM ${llm_cost:.4f} + תמלול ${transcript_cost:.4f})"
-                        "\nהחיוב בפועל עשוי להיות $0 במסגרת המכסות/credits."
+                        "\nהחיוב בפועל עשוי להיות $0 במסגרת המכסות/credits; תרגום מלא ושאלות המשך אינם כלולים במספר זה."
                     )
                 body = f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
                 chunks = self._split_text(body)

@@ -94,16 +94,8 @@ class YouTubeProcessor:
     def _captions(self, video_id: str, url: str):
         last_error = None
 
-        # 1) Direct YouTube access from the host.
-        try:
-            segments, language = self._fetch_youtube_captions(video_id, None)
-            if segments:
-                return segments, language, "youtube_captions_direct", None, None
-        except Exception as exc:
-            last_error = exc
-
-        # 2) Hosted transcript API. This avoids datacenter-IP blocking and is
-        # intentionally tried before any user-configured proxy.
+        # Prefer the configured hosted provider on servers where YouTube blocks
+        # datacenter IPs. Direct captions remain a free fallback.
         if self._supadata_key():
             try:
                 segments, language = self._supadata_captions(url)
@@ -112,7 +104,14 @@ class YouTubeProcessor:
             except Exception as exc:
                 last_error = exc
 
-        # 3) Proxy fallback only after direct access and hosted transcript API.
+        try:
+            segments, language = self._fetch_youtube_captions(video_id, None)
+            if segments:
+                return segments, language, "youtube_captions_direct", None, None
+        except Exception as exc:
+            last_error = exc
+
+        # Proxy fallback only after the preferred provider and direct captions.
         for proxy in self._proxy_candidates(include_direct=False):
             try:
                 segments, language = self._fetch_youtube_captions(video_id, proxy)
