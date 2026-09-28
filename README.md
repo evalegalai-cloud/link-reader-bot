@@ -226,3 +226,6 @@ The initial architecture, implementation, testing, and documentation were produc
 ## License
 
 Released under the [MIT License](LICENSE).
+
+
+WhatsApp setup uses the Meta test number first. The local one-time setup page accepts the temporary access token, Phone Number ID, WABA ID, App Secret, and an allowlisted personal WhatsApp number, then attempts to subscribe the WABA webhook automatically.

@@ -153,6 +153,7 @@ def test_whatsapp_signature_allowlist_and_stable_user_id():
     config = WhatsAppConfig(
         access_token="token",
         phone_number_id="123",
+        waba_id="456",
         app_secret="secret",
         verify_token="verify",
         graph_version="v26.0",

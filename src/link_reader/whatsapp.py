@@ -63,8 +63,8 @@ def _write_whatsapp_env(values: dict[str, str]) -> None:
     WHATSAPP_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
     order = [
         "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_ADMIN_TOKEN", "WHATSAPP_GRAPH_VERSION",
-        "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_APP_SECRET",
-        "WHATSAPP_ALLOWED_NUMBERS",
+        "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_WABA_ID",
+        "WHATSAPP_APP_SECRET", "WHATSAPP_ALLOWED_NUMBERS",
     ]
     text = "\n".join(f"{key}={_env_quote(values.get(key, ''))}" for key in order) + "\n"
     tmp = WHATSAPP_ENV_PATH.with_suffix(".tmp")
@@ -88,6 +88,7 @@ def _secret(name: str) -> str:
 class WhatsAppConfig:
     access_token: str
     phone_number_id: str
+    waba_id: str
     app_secret: str
     verify_token: str
     graph_version: str
@@ -127,6 +128,7 @@ class WhatsAppConfig:
         return cls(
             access_token=value("WHATSAPP_ACCESS_TOKEN") or _secret("WHATSAPP_ACCESS_TOKEN"),
             phone_number_id=value("WHATSAPP_PHONE_NUMBER_ID"),
+            waba_id=value("WHATSAPP_WABA_ID"),
             app_secret=value("WHATSAPP_APP_SECRET") or _secret("WHATSAPP_APP_SECRET"),
             verify_token=verify,
             graph_version=version,
@@ -428,6 +430,7 @@ def _admin_html(request: Request, action_path: str, message: str = "") -> str:
 <form method="post" action="{html.escape(action_path)}">
 <label>Access token</label><input type="password" name="access_token" {'required' if not cfg.access_token else ''} placeholder="{'מוגדר — השאר ריק כדי לשמור' if cfg.access_token else 'הדבק token'}">
 <label>Phone Number ID</label><input name="phone_number_id" required value="{html.escape(cfg.phone_number_id)}">
+<label>WABA ID</label><input name="waba_id" required value="{html.escape(cfg.waba_id)}">
 <label>App Secret</label><input type="password" name="app_secret" {'required' if not cfg.app_secret else ''} placeholder="{'מוגדר — השאר ריק כדי לשמור' if cfg.app_secret else 'הדבק App Secret'}">
 <label>המספרים שמותר להם להשתמש בבוט</label><input name="allowed_numbers" required value="{html.escape(allowed)}" placeholder="9725XXXXXXXX, ...">
 <label>Graph API version</label><input name="graph_version" value="{html.escape(cfg.graph_version)}">
@@ -454,6 +457,7 @@ async def save_admin_whatsapp(request: Request, token: str):
     current = gateway.config
     access = form.get("access_token", "").strip() or current.access_token
     phone = re.sub(r"\D", "", form.get("phone_number_id", "")) or current.phone_number_id
+    waba = re.sub(r"\D", "", form.get("waba_id", "")) or current.waba_id
     app_secret = form.get("app_secret", "").strip() or current.app_secret
     allowed_text = form.get("allowed_numbers", "").strip()
     allowed = frozenset(
@@ -464,7 +468,7 @@ async def save_admin_whatsapp(request: Request, token: str):
         version = "v" + version
     if not re.fullmatch(r"v\d+\.\d+", version):
         raise HTTPException(status_code=400, detail="Invalid Graph API version")
-    if not all((access, phone, app_secret, allowed)):
+    if not all((access, phone, waba, app_secret, allowed)):
         return HTMLResponse(
             _admin_html(request, request.url.path, "חסרים פרטים. מלא את כל השדות."),
             status_code=400,
@@ -476,19 +480,43 @@ async def save_admin_whatsapp(request: Request, token: str):
         "WHATSAPP_GRAPH_VERSION": version,
         "WHATSAPP_ACCESS_TOKEN": access,
         "WHATSAPP_PHONE_NUMBER_ID": phone,
+        "WHATSAPP_WABA_ID": waba,
         "WHATSAPP_APP_SECRET": app_secret,
         "WHATSAPP_ALLOWED_NUMBERS": ",".join(sorted(allowed)),
     }
     _write_whatsapp_env(values)
     gateway.config = WhatsAppConfig(
-        access_token=access, phone_number_id=phone, app_secret=app_secret,
+        access_token=access, phone_number_id=phone, waba_id=waba, app_secret=app_secret,
         verify_token=current.verify_token, graph_version=version, allowed_numbers=allowed,
         admin_token=next_admin_token,
     )
     host = request.headers.get("host") or request.url.netloc or "localhost"
     webhook = f"https://{host}/whatsapp/webhook"
-    success = f"""<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WhatsApp נשמר</title><style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:720px;margin:40px auto;padding:0 18px;line-height:1.6}}code{{direction:ltr;display:inline-block;background:#eee;padding:3px 6px;border-radius:5px;overflow-wrap:anywhere}}</style></head><body><h2>נשמר בהצלחה</h2><p>לינק ההגדרה הזה בוטל אוטומטית.</p><p>ב-Meta הגדר:</p><p><b>Callback URL:</b> <code>{html.escape(webhook)}</code><br><b>Verify token:</b> <code>{html.escape(current.verify_token)}</code></p><p>אחרי השמירה ב-Meta, שלח הודעה למספר ה-WhatsApp של האפליקציה.</p></body></html>"""
+    subscribed, subscription_message = await _subscribe_waba(gateway.config, webhook)
+    subscription_html = (
+        '<p class="ok">ה-Webhook נרשם אוטומטית ב-Meta.</p>'
+        if subscribed else
+        '<p>הפרטים נשמרו, אבל ההרשמה האוטומטית ל-Meta לא הושלמה. ' + html.escape(subscription_message) + '</p>'
+    )
+    success = f"""<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WhatsApp נשמר</title><style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:720px;margin:40px auto;padding:0 18px;line-height:1.6}}code{{direction:ltr;display:inline-block;background:#eee;padding:3px 6px;border-radius:5px;overflow-wrap:anywhere}}.ok{{background:#e8f5e9;padding:10px;border-radius:6px}}</style></head><body><h2>נשמר בהצלחה</h2><p>לינק ההגדרה הזה בוטל אוטומטית.</p>{subscription_html}<p><b>Callback URL:</b> <code>{html.escape(webhook)}</code><br><b>Verify token:</b> <code>{html.escape(current.verify_token)}</code></p><p>אם ההרשמה האוטומטית הצליחה, אפשר לשלוח הודעה למספר הבדיקה של Meta מיד.</p></body></html>"""
     return HTMLResponse(success)
+
+
+async def _subscribe_waba(config: WhatsAppConfig, callback_url: str) -> tuple[bool, str]:
+    if not config.waba_id:
+        return False, "WABA ID missing"
+    url = f"https://graph.facebook.com/{config.graph_version}/{config.waba_id}/subscribed_apps"
+    headers = {"Authorization": f"Bearer {config.access_token}", "Content-Type": "application/json"}
+    payload = {"override_callback_uri": callback_url, "verify_token": config.verify_token}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, headers=headers, json=payload)
+        if response.is_success:
+            return True, "Webhook subscription configured automatically."
+        detail = response.text[:500]
+        return False, f"Meta subscription failed ({response.status_code}): {detail}"
+    except Exception as exc:
+        return False, f"Meta subscription request failed: {type(exc).__name__}"
 
 
 @app.get("/whatsapp/health")
