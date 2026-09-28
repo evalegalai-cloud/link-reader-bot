@@ -127,22 +127,18 @@ def test_telegram_navigation_is_complete():
     def labels(markup):
         return [button.text for row in markup.inline_keyboard for button in row]
 
-    home = labels(bot._home_keyboard())
-    assert {"מקור נוכחי", "אחרונים", "מה נתמך"}.issubset(home)
+    # Global navigation is only in the persistent menu, not duplicated inline.
+    assert bot._home_keyboard() is None
+    assert bot._nav_keyboard() is None
 
     content = labels(bot._content_keyboard())
-    assert {"שאל שאלה", "תרגום מלא", "טקסט מלא", "אחרונים", "תפריט ראשי"}.issubset(content)
-
-    nav = labels(bot._nav_keyboard())
-    assert nav == ["מקור נוכחי", "תפריט ראשי"]
+    assert content == ["תרגום מלא", "טקסט מלא"]
 
     recent = labels(bot._videos_keyboard([
         {"id": 1, "title": "Article", "source_type": "web"},
         {"id": 2, "title": "Video", "source_type": "youtube"},
     ]))
-    assert "כתבה · Article" in recent
-    assert "YouTube · Video" in recent
-    assert "מקור נוכחי" in recent and "תפריט ראשי" in recent
+    assert recent == ["כתבה · Article", "YouTube · Video"]
 
 
 def test_whatsapp_signature_allowlist_and_stable_user_id():

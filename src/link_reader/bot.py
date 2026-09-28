@@ -240,10 +240,7 @@ class TelegramBot:
                 cost = content["processing_cost_usd"] if "processing_cost_usd" in keys else None
                 if cost is not None:
                     footer += f" · **עלות:** {self._format_cost(cost)}"
-                body = (
-                    f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
-                    "\n\nהטקסט נשמר כמקור הנוכחי. אפשר פשוט לשאול עליו."
-                )
+                body = f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
                 chunks = self._split_text(body)
                 await status.edit_text(
                     self._telegram_html(chunks[0]),
@@ -507,35 +504,18 @@ class TelegramBot:
         )
 
     def _home_keyboard(self):
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("מקור נוכחי", callback_data="current"),
-                InlineKeyboardButton("אחרונים", callback_data="videos"),
-            ],
-            [InlineKeyboardButton("מה נתמך", callback_data="help")],
-        ])
+        # Global navigation lives in the persistent reply keyboard below the input box.
+        return None
 
     def _nav_keyboard(self):
-        return InlineKeyboardMarkup([[
-            InlineKeyboardButton("מקור נוכחי", callback_data="current"),
-            InlineKeyboardButton("תפריט ראשי", callback_data="home"),
-        ]])
+        return None
 
     def _content_keyboard(self, include_ask: bool = True):
-        rows = []
-        if include_ask:
-            rows.append([InlineKeyboardButton("שאל שאלה", callback_data="ask")])
-        rows.extend([
-            [
-                InlineKeyboardButton("תרגום מלא", callback_data="translate"),
-                InlineKeyboardButton("טקסט מלא", callback_data="transcript"),
-            ],
-            [
-                InlineKeyboardButton("אחרונים", callback_data="videos"),
-                InlineKeyboardButton("תפריט ראשי", callback_data="home"),
-            ],
-        ])
-        return InlineKeyboardMarkup(rows)
+        # Keep only actions that apply specifically to the current source.
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("תרגום מלא", callback_data="translate"),
+            InlineKeyboardButton("טקסט מלא", callback_data="transcript"),
+        ]])
 
     def _source_label(self, source_type: str) -> str:
         return {
@@ -563,10 +543,6 @@ class TelegramBot:
                     f"{prefix} · {short}", callback_data=f"use:{row['id']}"
                 )
             ])
-        buttons.append([
-            InlineKeyboardButton("מקור נוכחי", callback_data="current"),
-            InlineKeyboardButton("תפריט ראשי", callback_data="home"),
-        ])
         return InlineKeyboardMarkup(buttons)
 
     def _force_rtl_lines(self, text: str) -> str:

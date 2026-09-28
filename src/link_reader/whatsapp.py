@@ -225,8 +225,7 @@ class WhatsAppGateway:
                 footer += f" · עלות: {self._cost(cost)}"
             return await self.send_text(
                 sender,
-                f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
-                "\n\nהטקסט נשמר כמקור הנוכחי. אפשר פשוט לשאול עליו.",
+                f"{prefix}{content['title']}\n\n{content['summary']}{footer}",
             )
 
         library_question = re.match(r"^(?:שאל\s+הכל|askall)\s+(.+)$", text, re.IGNORECASE)
@@ -256,7 +255,7 @@ class WhatsAppGateway:
             if not content:
                 return await self.send_text(sender, "לא מצאתי את המקור.")
             self.service.db.set_current_content(user_id, content["id"])
-            return await self.send_text(sender, f"נבחר: {content['title']}\nאפשר לשאול עליו עכשיו.")
+            return await self.send_text(sender, f"נבחר: {content['title']}")
         match = URL_RE.search(text)
         if match:
             started = time.monotonic()
@@ -269,7 +268,7 @@ class WhatsAppGateway:
                 footer += f" · עלות: {self._cost(cost)}"
             return await self.send_text(
                 sender,
-                f"{prefix}{content['title']}\n\n{content['summary']}{footer}\n\nאפשר לשאול שאלה או לשלוח קישור חדש.",
+                f"{prefix}{content['title']}\n\n{content['summary']}{footer}",
             )
         answer, _mode = await self.service.answer_freeform(user_id, text)
         await self.send_text(sender, answer)
@@ -310,7 +309,7 @@ class WhatsAppGateway:
                 footer += f" · עלות: {self._cost(cost)}"
             await self.send_text(
                 sender,
-                f"{prefix}{content['title']}\n\n{content['summary']}{footer}\n\nאפשר לשאול עליו עכשיו.",
+                f"{prefix}{content['title']}\n\n{content['summary']}{footer}",
             )
         finally:
             path.unlink(missing_ok=True)
