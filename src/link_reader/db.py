@@ -65,6 +65,19 @@ class Database:
         """
         with self.connect() as conn:
             conn.executescript(schema)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(content)")}
+            additions = {
+                "processing_input_tokens": "INTEGER",
+                "processing_output_tokens": "INTEGER",
+                "processing_cached_input_tokens": "INTEGER",
+                "llm_cost_usd": "REAL",
+                "transcript_credits": "REAL",
+                "transcript_cost_usd": "REAL",
+                "processing_cost_usd": "REAL",
+            }
+            for name, sql_type in additions.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE content ADD COLUMN {name} {sql_type}")
 
     def get_content_by_external_id(self, source_type: str, external_id: str):
         with self.connect() as conn:
@@ -107,6 +120,25 @@ class Database:
     def set_summary(self, content_id: int, summary: str) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE content SET summary=? WHERE id=?", (summary, content_id))
+
+    def set_processing_stats(
+        self, content_id: int, *, input_tokens: int, output_tokens: int,
+        cached_input_tokens: int, llm_cost_usd: float | None,
+        transcript_credits: float, transcript_cost_usd: float,
+    ) -> None:
+        total = None if llm_cost_usd is None else llm_cost_usd + transcript_cost_usd
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE content SET
+                   processing_input_tokens=?, processing_output_tokens=?,
+                   processing_cached_input_tokens=?, llm_cost_usd=?,
+                   transcript_credits=?, transcript_cost_usd=?, processing_cost_usd=?
+                   WHERE id=?""",
+                (
+                    input_tokens, output_tokens, cached_input_tokens, llm_cost_usd,
+                    transcript_credits, transcript_cost_usd, total, content_id,
+                ),
+            )
 
     def set_current_content(self, user_id: int, content_id: int) -> None:
         with self.connect() as conn:

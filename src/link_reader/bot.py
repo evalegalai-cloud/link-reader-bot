@@ -103,6 +103,16 @@ class TelegramBot:
                 elapsed = time.monotonic() - started
                 prefix = "כבר עיבדתי את הסרטון הזה בעבר.\n\n" if cached else ""
                 footer = f"\n\n**זמן עיבוד:** {self._format_duration(elapsed)}"
+                keys = set(content.keys())
+                cost = content["processing_cost_usd"] if "processing_cost_usd" in keys else None
+                if cost is not None:
+                    llm_cost = content["llm_cost_usd"] or 0.0
+                    transcript_cost = content["transcript_cost_usd"] or 0.0
+                    footer += (
+                        f"\n**עלות API משוערת:** ${cost:.4f} "
+                        f"(LLM ${llm_cost:.4f} + תמלול ${transcript_cost:.4f})"
+                        "\nהחיוב בפועל עשוי להיות $0 במסגרת המכסות/credits."
+                    )
                 body = f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
                 chunks = self._split_text(body)
                 await status.edit_text(
@@ -137,7 +147,7 @@ class TelegramBot:
             return await self._deny(update)
         user_id = update.effective_user.id
         async with self._locks[user_id]:
-            status = await update.effective_message.reply_text("מכין תרגום מלא לעברית…")
+            status = await update.effective_message.reply_text("מכין תרגום מלא לעברית ללא חותמות זמן… בסרטון ארוך זה עשוי לקחת כמה דקות.")
             try:
                 filename, text = await self.service.translate_current(user_id)
                 data = io.BytesIO(text.encode("utf-8"))
