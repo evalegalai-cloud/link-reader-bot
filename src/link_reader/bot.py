@@ -5,6 +5,7 @@ import html
 import io
 import logging
 import re
+import secrets
 import time
 import tempfile
 from pathlib import Path
@@ -45,6 +46,10 @@ class TelegramBot:
         app.add_handler(CommandHandler("use", self.use_content))
         app.add_handler(CommandHandler("search", self.search_library))
         app.add_handler(CommandHandler("askall", self.ask_all))
+        app.add_handler(CommandHandler("delete", self.delete_current))
+        app.add_handler(CommandHandler("invite", self.create_invite))
+        app.add_handler(CommandHandler("users", self.list_users))
+        app.add_handler(CommandHandler("revoke", self.revoke_user))
         app.add_handler(CallbackQueryHandler(self.callback))
         app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.Document.AUDIO, self.audio_message))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.message))
@@ -55,26 +60,54 @@ class TelegramBot:
         user = update.effective_user
         if not user:
             return False
-        if self.settings.allowed_user_ids:
-            return user.id in self.settings.allowed_user_ids
         owner_id = self.service.db.get_bot_owner()
-        return owner_id is not None and user.id == owner_id
+        if owner_id is not None and user.id == owner_id:
+            return True
+        if user.id in self.settings.allowed_user_ids:
+            return True
+        return self.service.db.is_authorized_user(user.id)
+
+    def _is_owner(self, update: Update) -> bool:
+        user = update.effective_user
+        owner_id = self.service.db.get_bot_owner()
+        return bool(user and owner_id is not None and user.id == owner_id)
 
     async def _deny(self, update: Update):
         if update.effective_message:
-            await update.effective_message.reply_text("אין הרשאה להשתמש בבוט הזה.")
+            await update.effective_message.reply_text(
+                "הבוט פרטי. אפשר להשתמש בו רק דרך קישור הזמנה אישי מבעל הבוט."
+            )
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         chat = update.effective_chat
         if not user or not chat:
             return
-        if not self.settings.allowed_user_ids and self.service.db.get_bot_owner() is None:
+        owner_id = self.service.db.get_bot_owner()
+        if owner_id is None:
             if chat.type != "private":
+                return await self._deny(update)
+            if self.settings.allowed_user_ids and user.id not in self.settings.allowed_user_ids:
                 return await self._deny(update)
             if not self.service.db.claim_bot_owner(user.id):
                 return await self._deny(update)
             logger.info("Telegram bot owner claimed on first private /start")
+
+        invite_arg = (context.args[0] if context.args else "").strip()
+        if invite_arg.startswith("invite_") and not self._authorized(update):
+            token = invite_arg.removeprefix("invite_")
+            redeemed = self.service.db.redeem_invite(
+                token, user.id, username=user.username, display_name=user.full_name
+            )
+            if redeemed:
+                await update.effective_message.reply_text(
+                    "✅ ההזמנה הופעלה. יש לך עכשיו גישה ל-Link Reader."
+                )
+            else:
+                await update.effective_message.reply_text(
+                    "קישור ההזמנה אינו תקף או שכבר נעשה בו שימוש."
+                )
+                return
         if not self._authorized(update):
             return await self._deny(update)
         await update.effective_message.reply_text(
@@ -321,6 +354,56 @@ class TelegramBot:
                     self._friendly_error(exc), reply_markup=self._content_keyboard()
                 )
 
+    async def delete_current(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._authorized(update):
+            return await self._deny(update)
+        user_id = update.effective_user.id
+        current = self.service.db.get_current_content(user_id)
+        if not current:
+            return await update.effective_message.reply_text("אין כרגע מקור פעיל למחיקה.")
+        await update.effective_message.reply_text(
+            f"למחוק מהספרייה את:\n{current['title']}?",
+            reply_markup=self._delete_confirm_keyboard(current["id"]),
+        )
+
+    async def create_invite(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_owner(update):
+            return await self._deny(update)
+        token = secrets.token_urlsafe(18)
+        self.service.db.create_invite(token, update.effective_user.id)
+        me = await context.bot.get_me()
+        link = f"https://t.me/{me.username}?start=invite_{token}"
+        await update.effective_message.reply_text(
+            "קישור הזמנה חד־פעמי:\n" + link +
+            "\n\nהקישור תקף לשימוש אחד בלבד ולמשך עד 7 ימים."
+        )
+
+    async def list_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_owner(update):
+            return await self._deny(update)
+        rows = self.service.db.list_authorized_users()
+        if not rows:
+            return await update.effective_message.reply_text("אין כרגע משתמשים מוזמנים פעילים.")
+        lines = ["משתמשים מוזמנים פעילים:"]
+        for row in rows:
+            label = row["display_name"] or ("@" + row["username"] if row["username"] else "משתמש")
+            username = f" (@{row['username']})" if row["username"] and not label.startswith("@") else ""
+            lines.append(f"• {label}{username} — {row['user_id']}")
+        lines.append("\nלביטול גישה: /revoke USER_ID")
+        await update.effective_message.reply_text("\n".join(lines))
+
+    async def revoke_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_owner(update):
+            return await self._deny(update)
+        if not context.args or not context.args[0].lstrip("-").isdigit():
+            return await update.effective_message.reply_text("שימוש: /revoke USER_ID")
+        user_id = int(context.args[0])
+        if user_id == self.service.db.get_bot_owner():
+            return await update.effective_message.reply_text("אי אפשר לבטל את הרשאת בעל הבוט.")
+        if self.service.db.revoke_user_access(user_id):
+            return await update.effective_message.reply_text("✅ ההרשאה בוטלה.")
+        await update.effective_message.reply_text("לא מצאתי הרשאה פעילה למשתמש הזה.")
+
     async def search_library(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._authorized(update):
             return await self._deny(update)
@@ -432,6 +515,14 @@ class TelegramBot:
             return await query.edit_message_text(
                 self._supported_text(), reply_markup=self._nav_keyboard()
             )
+        if query.data == "delete_current":
+            content = self.service.db.get_current_content(user_id)
+            if not content:
+                return await query.edit_message_text("אין כרגע מקור פעיל למחיקה.")
+            return await query.edit_message_text(
+                f"למחוק מהספרייה את:\n{content['title']}?",
+                reply_markup=self._delete_confirm_keyboard(content["id"]),
+            )
         if query.data == "current":
             content = self.service.db.get_current_content(user_id)
             if not content:
@@ -460,6 +551,45 @@ class TelegramBot:
             return await query.edit_message_text(
                 "בחר מקור:", reply_markup=self._videos_keyboard(rows)
             )
+        if query.data and query.data.startswith("delete:"):
+            content_id = query.data.split(":", 1)[1]
+            if not content_id.isdigit():
+                return
+            content = self.service.db.get_user_content(user_id, int(content_id))
+            if not content:
+                return await query.edit_message_text("המקור כבר לא נמצא בספרייה שלך.")
+            return await query.edit_message_text(
+                f"למחוק מהספרייה את:\n{content['title']}?",
+                reply_markup=self._delete_confirm_keyboard(content["id"]),
+            )
+        if query.data and query.data.startswith("delete_yes:"):
+            content_id = query.data.split(":", 1)[1]
+            if not content_id.isdigit():
+                return
+            content = self.service.db.get_user_content(user_id, int(content_id))
+            title = content["title"] if content else "המקור"
+            removed, purged = self.service.db.remove_user_content(user_id, int(content_id))
+            if not removed:
+                return await query.edit_message_text("המקור כבר לא נמצא בספרייה שלך.")
+            suffix = " התוכן נמחק גם מהאחסון כי אף משתמש אחר לא שמר אותו." if purged else ""
+            return await query.edit_message_text(f"✅ {title} נמחק מהספרייה שלך.{suffix}")
+        if query.data and query.data.startswith("delete_no:"):
+            return await query.edit_message_text("המחיקה בוטלה.")
+        if query.data == "clear_library":
+            return await query.edit_message_text(
+                "למחוק את כל המקורות מהספרייה שלך? הפעולה אינה ניתנת לביטול.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("כן, מחק הכל", callback_data="clear_yes"),
+                    InlineKeyboardButton("ביטול", callback_data="clear_no"),
+                ]]),
+            )
+        if query.data == "clear_yes":
+            removed, purged = self.service.db.clear_user_library(user_id)
+            return await query.edit_message_text(
+                f"✅ נמחקו {removed} מקורות מהספרייה שלך. {purged} מהם נמחקו גם מהאחסון."
+            )
+        if query.data == "clear_no":
+            return await query.edit_message_text("המחיקה בוטלה.")
         if query.data and query.data.startswith("use:"):
             content_id = query.data.split(":", 1)[1]
             if not content_id.isdigit():
@@ -508,7 +638,8 @@ class TelegramBot:
             "הספרייה שלך\n"
             "• 🔎 הספרייה — שאלה על כל המקורות שלך\n"
             "• 🗂️ אחרונים — מעבר למקור קודם\n"
-            "• 📌 מקור נוכחי — לראות על מה השיחה מבוססת\n\n"
+            "• 📌 מקור נוכחי — לראות על מה השיחה מבוססת\n"
+            "• למחיקה: פתח מקור או ‘אחרונים’ ולחץ 🗑️\n\n"
             "אם עמוד דורש התחברות ולא ניתן לקרוא אותו, אפשר להדביק כאן את הטקסט "
             "או לשלוח את הקובץ עצמו."
         )
@@ -559,9 +690,18 @@ class TelegramBot:
 
     def _content_keyboard(self, include_ask: bool = True):
         # Keep only actions that apply specifically to the current source.
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("תרגום מלא", callback_data="translate"),
+                InlineKeyboardButton("טקסט מלא", callback_data="transcript"),
+            ],
+            [InlineKeyboardButton("🗑️ מחק מהספרייה", callback_data="delete_current")],
+        ])
+
+    def _delete_confirm_keyboard(self, content_id: int):
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton("תרגום מלא", callback_data="translate"),
-            InlineKeyboardButton("טקסט מלא", callback_data="transcript"),
+            InlineKeyboardButton("כן, מחק", callback_data=f"delete_yes:{content_id}"),
+            InlineKeyboardButton("ביטול", callback_data=f"delete_no:{content_id}"),
         ]])
 
     def _source_label(self, source_type: str) -> str:
@@ -588,7 +728,12 @@ class TelegramBot:
             buttons.append([
                 InlineKeyboardButton(
                     f"{prefix} · {short}", callback_data=f"use:{row['id']}"
-                )
+                ),
+                InlineKeyboardButton("🗑️", callback_data=f"delete:{row['id']}"),
+            ])
+        if buttons:
+            buttons.append([
+                InlineKeyboardButton("🗑️ מחק את כל הספרייה", callback_data="clear_library")
             ])
         return InlineKeyboardMarkup(buttons)
 

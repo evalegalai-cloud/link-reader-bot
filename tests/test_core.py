@@ -132,13 +132,13 @@ def test_telegram_navigation_is_complete():
     assert bot._nav_keyboard() is None
 
     content = labels(bot._content_keyboard())
-    assert content == ["תרגום מלא", "טקסט מלא"]
+    assert content == ["תרגום מלא", "טקסט מלא", "🗑️ מחק מהספרייה"]
 
     recent = labels(bot._videos_keyboard([
         {"id": 1, "title": "Article", "source_type": "web"},
         {"id": 2, "title": "Video", "source_type": "youtube"},
     ]))
-    assert recent == ["כתבה · Article", "YouTube · Video"]
+    assert recent == ["כתבה · Article", "🗑️", "YouTube · Video", "🗑️", "🗑️ מחק את כל הספרייה"]
 
 
 def test_whatsapp_signature_allowlist_and_stable_user_id():
@@ -510,3 +510,72 @@ def test_library_is_isolated_per_user(tmp_path):
         pass
     else:
         raise AssertionError("user 222 must not be able to select user 111 content")
+
+
+def test_invite_is_one_time_and_revocable(tmp_path):
+    from link_reader.db import Database
+
+    db = Database(str(tmp_path / "access.db"))
+    token = "test-one-time-invite-token"
+    db.create_invite(token, 111)
+    assert db.redeem_invite(token, 222, username="guest", display_name="Guest") is True
+    assert db.is_authorized_user(222) is True
+    assert db.redeem_invite(token, 333, username="other", display_name="Other") is False
+    assert db.is_authorized_user(333) is False
+    assert db.revoke_user_access(222) is True
+    assert db.is_authorized_user(222) is False
+
+
+def test_delete_user_content_is_scoped_and_garbage_collects(tmp_path):
+    from types import SimpleNamespace
+    from link_reader.db import Database
+
+    db = Database(str(tmp_path / "delete.db"))
+    item = SimpleNamespace(
+        source_type="text", external_id="shared", url="text://shared",
+        title="Shared", author=None, duration_seconds=None, language="he",
+        extraction_method="pasted_text",
+    )
+    content_id = db.save_content(item, "shared text")
+    db.replace_chunks(content_id, [{
+        "ordinal": 0, "start_seconds": 0.0, "end_seconds": 1.0,
+        "text": "shared text", "map_summary": None,
+    }])
+    db.save_user_content(1, content_id)
+    db.save_user_content(2, content_id)
+    db.set_current_content(1, content_id)
+    db.set_current_content(2, content_id)
+
+    removed, purged = db.remove_user_content(1, content_id)
+    assert removed is True and purged is False
+    assert db.get_user_content(1, content_id) is None
+    assert db.get_user_content(2, content_id) is not None
+    assert db.get_content(content_id) is not None
+
+    removed, purged = db.remove_user_content(2, content_id)
+    assert removed is True and purged is True
+    assert db.get_content(content_id) is None
+
+
+def test_clear_library_keeps_shared_content(tmp_path):
+    from types import SimpleNamespace
+    from link_reader.db import Database
+
+    db = Database(str(tmp_path / "clear.db"))
+    def add(ext):
+        item = SimpleNamespace(
+            source_type="text", external_id=ext, url=f"text://{ext}", title=ext,
+            author=None, duration_seconds=None, language="he", extraction_method="pasted_text",
+        )
+        cid = db.save_content(item, ext)
+        db.replace_chunks(cid, [{"ordinal":0,"start_seconds":0.0,"end_seconds":1.0,"text":ext,"map_summary":None}])
+        return cid
+    shared = add("shared")
+    private = add("private")
+    db.save_user_content(10, shared)
+    db.save_user_content(20, shared)
+    db.save_user_content(10, private)
+    removed, purged = db.clear_user_library(10)
+    assert (removed, purged) == (2, 1)
+    assert db.get_content(shared) is not None
+    assert db.get_content(private) is None

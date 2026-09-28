@@ -66,7 +66,7 @@ The example configuration defaults to Hebrew. The practical language coverage de
 - Original transcript export.
 - SQLite persistence and caching.
 - Recent-video history and switching between saved videos.
-- Telegram user allow-list.
+- Private-by-default Telegram access with static allow-list support and one-time invite links.
 - Separate fast and smart LLM routes.
 - Anthropic or OpenAI-compatible LLM endpoints.
 - Docker deployment.
@@ -113,7 +113,7 @@ This keeps routine processing inexpensive while reserving the stronger model for
 
 Open `@BotFather` in Telegram, run `/newbot`, choose a name and username, and copy the bot token.
 
-You will also need your numeric Telegram user ID for the allow-list.
+A static numeric Telegram allow-list is optional. The first private `/start` claims the owner when no owner exists; the owner can then issue one-time invite links from inside the bot.
 
 ### 2. Configure the environment
 
@@ -136,7 +136,7 @@ LLM_BASE_URL=
 TARGET_LANGUAGE=Hebrew
 ```
 
-For multiple allowed users, separate Telegram IDs with commas.
+`TELEGRAM_ALLOWED_USER_IDS` is optional. Use it for permanent static access; invited users are stored in SQLite and can be revoked by the owner.
 
 ### 3. Run with Docker
 
@@ -159,6 +159,13 @@ docker compose logs -f --tail=200
 - `/use ID` — switch back to a previous source.
 - `/search QUERY` — search across saved source chunks with local SQLite FTS5.
 - `/askall QUESTION` — grounded Q&A across retrieved saved sources.
+- `/delete` — delete the active source from your own library (with confirmation).
+
+Owner-only commands:
+
+- `/invite` — create a one-use invite link, valid for up to 7 days.
+- `/users` — list currently authorized invited users.
+- `/revoke USER_ID` — revoke an invited user's access immediately.
 
 Any ordinary text message sent after processing a source is treated as a follow-up question about it.
 
@@ -200,7 +207,9 @@ To install the local ASR fallback:
 
 ## Security
 
-The bot rejects Telegram users whose numeric IDs are not listed in `TELEGRAM_ALLOWED_USER_IDS`.
+The bot is private by default. Access is granted only to the owner, IDs explicitly listed in `TELEGRAM_ALLOWED_USER_IDS`, or users who redeem a valid one-time invite link. Knowing or discovering the bot username alone does not grant access and unauthorized messages never reach the LLM. Invite tokens are stored only as SHA-256 hashes, are single-use, and expire after 7 days.
+
+Saved-source visibility is scoped per user. Deleting a source removes that user's Q&A/state and library link; the cached source itself is garbage-collected only when no other user still owns it.
 
 Do not commit:
 

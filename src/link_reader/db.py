@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 from pathlib import Path
@@ -70,6 +71,22 @@ class Database:
             slot INTEGER PRIMARY KEY CHECK(slot = 1),
             user_id INTEGER UNIQUE NOT NULL,
             claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS authorized_users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            display_name TEXT,
+            granted_by INTEGER,
+            granted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            revoked_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS invite_tokens (
+            token_hash TEXT PRIMARY KEY,
+            created_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            used_by INTEGER,
+            used_at TEXT,
+            revoked_at TEXT
         );
         CREATE TABLE IF NOT EXISTS webhook_events (
             channel TEXT NOT NULL,
@@ -297,6 +314,71 @@ class Database:
                 (user_id, limit),
             ).fetchall()
 
+    def remove_user_content(self, user_id: int, content_id: int) -> tuple[bool, bool]:
+        """Remove one source from a user's library; purge globally if orphaned."""
+        with self.connect() as conn:
+            owned = conn.execute(
+                "SELECT 1 FROM user_content WHERE user_id=? AND content_id=?",
+                (user_id, content_id),
+            ).fetchone()
+            if not owned:
+                return False, False
+            conn.execute(
+                "DELETE FROM qa_history WHERE user_id=? AND content_id=?",
+                (user_id, content_id),
+            )
+            conn.execute(
+                "DELETE FROM user_state WHERE user_id=? AND content_id=?",
+                (user_id, content_id),
+            )
+            conn.execute(
+                "DELETE FROM user_content WHERE user_id=? AND content_id=?",
+                (user_id, content_id),
+            )
+            remaining = conn.execute(
+                "SELECT 1 FROM user_content WHERE content_id=? LIMIT 1",
+                (content_id,),
+            ).fetchone()
+            purged = remaining is None
+            if purged:
+                try:
+                    conn.execute("DELETE FROM chunk_fts WHERE content_id=?", (content_id,))
+                except sqlite3.OperationalError:
+                    pass
+                conn.execute("DELETE FROM content WHERE id=?", (content_id,))
+            return True, purged
+
+    def clear_user_library(self, user_id: int) -> tuple[int, int]:
+        """Remove all sources for one user and garbage-collect orphaned content."""
+        with self.connect() as conn:
+            ids = [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT content_id FROM user_content WHERE user_id=?",
+                    (user_id,),
+                ).fetchall()
+            ]
+            if not ids:
+                return 0, 0
+            conn.execute("DELETE FROM qa_history WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM user_state WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM user_content WHERE user_id=?", (user_id,))
+            purged = 0
+            for content_id in ids:
+                remaining = conn.execute(
+                    "SELECT 1 FROM user_content WHERE content_id=? LIMIT 1",
+                    (content_id,),
+                ).fetchone()
+                if remaining:
+                    continue
+                try:
+                    conn.execute("DELETE FROM chunk_fts WHERE content_id=?", (content_id,))
+                except sqlite3.OperationalError:
+                    pass
+                conn.execute("DELETE FROM content WHERE id=?", (content_id,))
+                purged += 1
+            return len(ids), purged
+
     def search_library(self, user_id: int, query: str, limit: int = 8):
         stopwords = {
             "מה", "מי", "איך", "האם", "על", "של", "את", "זה", "זו", "עם", "כל",
@@ -350,6 +432,97 @@ class Database:
                         LIMIT ?""",
                     [user_id, *params],
                 ).fetchall()
+
+    @staticmethod
+    def _invite_hash(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def is_authorized_user(self, user_id: int) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM authorized_users WHERE user_id=? AND revoked_at IS NULL",
+                (user_id,),
+            ).fetchone()
+        return row is not None
+
+    def grant_user_access(
+        self, user_id: int, *, username: str | None = None,
+        display_name: str | None = None, granted_by: int | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO authorized_users
+                   (user_id, username, display_name, granted_by, revoked_at)
+                   VALUES (?, ?, ?, ?, NULL)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                     username=excluded.username,
+                     display_name=excluded.display_name,
+                     granted_by=excluded.granted_by,
+                     granted_at=CURRENT_TIMESTAMP,
+                     revoked_at=NULL""",
+                (user_id, username, display_name, granted_by),
+            )
+
+    def revoke_user_access(self, user_id: int) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                """UPDATE authorized_users SET revoked_at=CURRENT_TIMESTAMP
+                   WHERE user_id=? AND revoked_at IS NULL""",
+                (user_id,),
+            )
+            return cur.rowcount > 0
+
+    def list_authorized_users(self):
+        with self.connect() as conn:
+            return conn.execute(
+                """SELECT user_id, username, display_name, granted_at
+                   FROM authorized_users
+                   WHERE revoked_at IS NULL
+                   ORDER BY granted_at DESC"""
+            ).fetchall()
+
+    def create_invite(self, token: str, created_by: int) -> None:
+        token_hash = self._invite_hash(token)
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO invite_tokens(token_hash, created_by) VALUES (?, ?)",
+                (token_hash, created_by),
+            )
+
+    def redeem_invite(
+        self, token: str, user_id: int, *, username: str | None = None,
+        display_name: str | None = None,
+    ) -> bool:
+        token_hash = self._invite_hash(token)
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            invite = conn.execute(
+                """SELECT created_by FROM invite_tokens
+                   WHERE token_hash=? AND used_at IS NULL AND revoked_at IS NULL
+                     AND created_at >= datetime('now', '-7 days')""",
+                (token_hash,),
+            ).fetchone()
+            if not invite:
+                return False
+            cur = conn.execute(
+                """UPDATE invite_tokens
+                   SET used_by=?, used_at=CURRENT_TIMESTAMP
+                   WHERE token_hash=? AND used_at IS NULL AND revoked_at IS NULL""",
+                (user_id, token_hash),
+            )
+            if cur.rowcount != 1:
+                return False
+            conn.execute(
+                """INSERT INTO authorized_users
+                   (user_id, username, display_name, granted_by, revoked_at)
+                   VALUES (?, ?, ?, ?, NULL)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                     username=excluded.username, display_name=excluded.display_name,
+                     granted_by=excluded.granted_by, granted_at=CURRENT_TIMESTAMP,
+                     revoked_at=NULL""",
+                (user_id, username, display_name, int(invite["created_by"])),
+            )
+            return True
 
     def get_bot_owner(self) -> int | None:
         with self.connect() as conn:
