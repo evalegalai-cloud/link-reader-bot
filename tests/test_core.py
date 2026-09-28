@@ -32,3 +32,20 @@ def test_chunking_preserves_timestamps():
     assert len(chunks) >= 2
     assert chunks[0]["start_seconds"] == 0
     assert "[00:00]" in chunks[0]["text"]
+
+
+def test_telegram_rendering_and_long_split():
+    from link_reader.bot import TelegramBot
+
+    bot = TelegramBot(SimpleNamespace(), SimpleNamespace())
+    text = ("**כותרת:** מונח (Corpus Paulinum). *הערה*. [12:34]\n" * 100)
+    text += "\n**זמן עיבוד:** דקה אחת ו־41 שניות"
+    chunks = bot._split_text(text)
+    assert len(chunks) > 1
+    assert max(len(chunk) for chunk in chunks) <= 3500
+    assert sum(chunk.count("Corpus Paulinum") for chunk in chunks) == 100
+    rendered = [bot._telegram_html(chunk) for chunk in chunks]
+    assert all("*" not in chunk for chunk in rendered)
+    assert sum(chunk.count("<b>") for chunk in rendered) == sum(chunk.count("</b>") for chunk in rendered)
+    assert any("זמן עיבוד" in chunk for chunk in rendered)
+    assert bot._format_duration(61) == "דקה אחת ו־שנייה אחת"

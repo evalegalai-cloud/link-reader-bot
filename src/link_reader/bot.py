@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import io
 import logging
 import re
+import time
 from collections import defaultdict
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -91,18 +93,29 @@ class TelegramBot:
 
     async def _handle_url(self, update: Update, url: str, user_id: int):
         async with self._locks[user_id]:
+            started = time.monotonic()
             status = await update.effective_message.reply_text(
-                "קיבלתי. אני מחלץ את התמלול ומכין מפת תוכן וסיכום בעברית."
+                "קיבלתי. אני מחלץ את התמלול ומכין מפת תוכן וסיכום בעברית. "
+                "בסיום אציג גם את זמן העיבוד."
             )
             try:
                 content, cached = await self.service.ingest(url, user_id)
+                elapsed = time.monotonic() - started
                 prefix = "כבר עיבדתי את הסרטון הזה בעבר.\n\n" if cached else ""
+                footer = f"\n\n**זמן עיבוד:** {self._format_duration(elapsed)}"
+                body = f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
+                chunks = self._split_text(body)
                 await status.edit_text(
-                    f"{prefix}{content['title']}\n\n{content['summary'][:3600]}",
-                    reply_markup=self._content_keyboard(),
+                    self._telegram_html(chunks[0]),
+                    parse_mode="HTML",
+                    reply_markup=self._content_keyboard() if len(chunks) == 1 else None,
                 )
-                if len(content["summary"]) > 3600:
-                    await self._send_long(update.effective_message, content["summary"][3600:])
+                for i, chunk in enumerate(chunks[1:], start=1):
+                    await update.effective_message.reply_text(
+                        self._telegram_html(chunk),
+                        parse_mode="HTML",
+                        reply_markup=self._content_keyboard() if i == len(chunks) - 1 else None,
+                    )
             except Exception as exc:
                 logger.exception("Failed processing URL")
                 await status.edit_text(f"לא הצלחתי לעבד את הקישור: {self._friendly_error(exc)}")
@@ -195,17 +208,60 @@ class TelegramBot:
             InlineKeyboardButton("תמלול מקורי", callback_data="transcript"),
         ]])
 
-    async def _send_long(self, message, text: str):
+    def _telegram_html(self, text: str) -> str:
+        escaped = html.escape(text, quote=False)
+        escaped = re.sub(r"(?m)^\s*\*\s+", "• ", escaped)
+        escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped, flags=re.DOTALL)
+        escaped = re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"<i>\1</i>", escaped)
+        escaped = re.sub(r"(?m)^#{1,6}\s+", "", escaped)
+        escaped = escaped.replace("*", "")
+        return escaped
+
+    def _split_text(self, text: str, limit: int = 3500) -> list[str]:
         remaining = text.strip()
+        chunks = []
         while remaining:
-            if len(remaining) <= 3900:
-                chunk, remaining = remaining, ""
-            else:
-                cut = remaining.rfind("\n", 0, 3900)
-                if cut < 1000:
-                    cut = 3900
-                chunk, remaining = remaining[:cut], remaining[cut:].lstrip()
-            await message.reply_text(chunk)
+            if len(remaining) <= limit:
+                chunks.append(remaining)
+                break
+            cut = remaining.rfind("\n", 0, limit)
+            if cut < 1000:
+                cut = remaining.rfind(" ", 0, limit)
+            if cut < 1000:
+                cut = limit
+
+            # Do not split inside a **bold** span. If the tentative chunk has
+            # an unmatched opening marker, move the boundary before it.
+            prefix = remaining[:cut]
+            if prefix.count("**") % 2:
+                opening = prefix.rfind("**")
+                if opening >= 1000:
+                    cut = opening
+
+            chunks.append(remaining[:cut].rstrip())
+            remaining = remaining[cut:].lstrip()
+        return chunks
+
+    def _format_duration(self, seconds: float) -> str:
+        total = max(0, int(round(seconds)))
+        if total < 1:
+            return "פחות משנייה"
+        if total < 60:
+            return "שנייה אחת" if total == 1 else f"{total} שניות"
+        hours, rem = divmod(total, 3600)
+        minutes, secs = divmod(rem, 60)
+        parts = []
+        if hours:
+            parts.append("שעה אחת" if hours == 1 else f"{hours} שעות")
+        if minutes:
+            parts.append("דקה אחת" if minutes == 1 else f"{minutes} דקות")
+        if secs:
+            parts.append("שנייה אחת" if secs == 1 else f"{secs} שניות")
+        return " ו־".join(parts)
+
+    async def _send_long(self, message, text: str):
+        for chunk in self._split_text(text):
+            await message.reply_text(self._telegram_html(chunk), parse_mode="HTML")
 
     def _friendly_error(self, exc: Exception) -> str:
         text = str(exc).strip()

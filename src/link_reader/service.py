@@ -9,17 +9,24 @@ from link_reader.types import format_timestamp
 MAP_SYSTEM = """Create a faithful content map from the transcript excerpt.
 Use only the transcript. Do not add external knowledge or guess.
 Write 3–8 concise points and preserve useful timestamps from the source.
+When the target output is Hebrew, preserve important foreign proper names, technical terms, titles, Latin/Greek expressions, and other terms whose original spelling matters by including the original-language form in parentheses on first meaningful occurrence.
 The map will later be used to route follow-up questions to the right excerpt."""
 FINAL_SYSTEM = """Summarize the video faithfully from the supplied content map.
 Do not add facts that are not present in the source.
 Clearly distinguish the speaker's claims, opinions, and predictions from established facts.
-Structure the answer as: one-line takeaway, key points, and a timestamped timeline."""
+Structure the answer as: one-line takeaway, key points, and a timestamped timeline.
+When writing in Hebrew, on the first meaningful occurrence of an important foreign proper name, technical term, title, Latin/Greek expression, or term whose original spelling matters, include the original-language form in parentheses after the Hebrew form. Do this selectively, not for ordinary words.
+Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold.
+Finish the response with the exact marker [[END_OF_SUMMARY]] on a line by itself."""
 QA_SYSTEM = """Answer only from the supplied transcript excerpts.
 Do not use outside knowledge unless the user explicitly asks for it.
 When possible, cite the exact timestamp as [MM:SS] or [HH:MM:SS].
-If the excerpts do not support an answer, say so clearly instead of guessing."""
+If the excerpts do not support an answer, say so clearly instead of guessing.
+When answering in Hebrew, on the first meaningful occurrence of an important foreign proper name, technical term, title, Latin/Greek expression, or term whose original spelling matters, include the original-language form in parentheses after the Hebrew form. Do this selectively, not for ordinary words.
+Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold."""
 TRANSLATE_SYSTEM = """Translate the transcript faithfully and naturally.
-Preserve every timestamp exactly as written. Do not summarize or omit material information."""
+Preserve every timestamp exactly as written. Do not summarize or omit material information.
+When translating into Hebrew, preserve important foreign proper names, technical terms, titles, and Latin/Greek expressions in their original-language form in parentheses on first meaningful occurrence."""
 
 
 class ContentService:
@@ -77,12 +84,28 @@ class ContentService:
             f"{format_timestamp(c['end_seconds'])}):\n{c['map_summary']}"
             for c in chunks
         )
+        final_prompt = (
+            f"Title: {item.title}\nCreator/channel: {item.author or 'Unknown'}\n\n{maps}"
+        )
         summary = await self.llm.complete(
             FINAL_SYSTEM + f"\nTarget output language: {self.target_language}.",
-            f"Title: {item.title}\nCreator/channel: {item.author or 'Unknown'}\n\n{maps}",
-            max_tokens=5000,
+            final_prompt,
+            max_tokens=7000,
             tier="smart",
         )
+        marker = "[[END_OF_SUMMARY]]"
+        if marker not in summary:
+            summary = await self.llm.complete(
+                FINAL_SYSTEM
+                + f"\nTarget output language: {self.target_language}."
+                + "\nIMPORTANT: the previous generation was truncated. Produce the complete summary from scratch and do not stop before the end marker.",
+                final_prompt,
+                max_tokens=12000,
+                tier="smart",
+            )
+        if marker not in summary:
+            raise RuntimeError("המודל החזיר סיכום לא שלם גם לאחר ניסיון חוזר.")
+        summary = summary.split(marker, 1)[0].rstrip()
         self.db.set_summary(content_id, summary)
         self.db.set_current_content(user_id, content_id)
         return self.db.get_content(content_id), False
