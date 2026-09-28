@@ -214,6 +214,15 @@ class WhatsAppGateway:
         if not text:
             return
         lowered = text.casefold()
+        library_question = re.match(r"^(?:שאל\s+הכל|askall)\s+(.+)$", text, re.IGNORECASE)
+        if library_question:
+            answer = await self.service.answer_library(library_question.group(1).strip())
+            return await self.send_text(sender, answer)
+        library_search = re.match(r"^(?:חפש|search)\s+(.+)$", text, re.IGNORECASE)
+        if library_search:
+            return await self.send_text(
+                sender, self.service.library_search_text(library_search.group(1).strip())
+            )
         if lowered in {"עזרה", "תפריט", "help", "menu"}:
             return await self.send_text(sender, self.help_text(user_id))
         if lowered in {"מקור נוכחי", "current"}:
@@ -365,6 +374,7 @@ class WhatsAppGateway:
             "קישור חדש יוצר מקור; טקסט שואל על המקור הנוכחי.",
             "הודעה קולית קצרה שואלת בקול כשיש מקור פתוח.",
             "אפשר לכתוב: מקור נוכחי · אחרונים · תפריט",
+            "ספרייה: חפש <מילים> · שאל הכל <שאלה>",
         ]
         if current:
             lines.append(f"\nמקור נוכחי: {current['title']}")

@@ -155,6 +155,8 @@ docker compose logs -f --tail=200
 - `/transcript` — export the extracted source text.
 - `/videos` — list recently processed sources.
 - `/use ID` — switch back to a previous source.
+- `/search QUERY` — search across saved source chunks with local SQLite FTS5.
+- `/askall QUESTION` — grounded Q&A across retrieved saved sources.
 
 Any ordinary text message sent after processing a source is treated as a follow-up question about it.
 

@@ -57,6 +57,9 @@ Validation (2026-09-28):
 - Voice-note download + `gpt-transcribe` + Q&A/source ingestion ✅
 - Live Meta account activation — waiting only for credentials / phone-number setup
 
-## Stage 8 — Knowledge library
-- Cross-content search and Q&A
-- SQLite FTS first; vector DB only if justified
+## Stage 8 — Knowledge library 🚧
+- SQLite FTS5 chunk index across saved sources ✅
+- Cross-content keyword search in Telegram and WhatsApp ✅
+- Grounded cross-source Q&A over retrieved evidence ✅
+- Retrieval evaluation / query expansion — next
+- Vector DB only if FTS quality data justifies it

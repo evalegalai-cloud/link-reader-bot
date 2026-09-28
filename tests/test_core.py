@@ -339,3 +339,33 @@ def test_epub_spine_order_metadata_and_registry_parity():
     assert sum(isinstance(p, EPUBProcessor) for p in registry) == 1
     assert sum(isinstance(p, PodcastProcessor) for p in registry) == 1
     assert sum(isinstance(p, RedditProcessor) for p in registry) == 1
+
+
+def test_library_fts_search_indexes_saved_chunks(tmp_path):
+    from types import SimpleNamespace
+    from link_reader.db import Database
+
+    db = Database(str(tmp_path / "library.db"))
+    item = SimpleNamespace(
+        source_type="pdf",
+        external_id="energy-doc",
+        url="https://example.com/energy.pdf",
+        title="דו״ח תשתיות אנרגיה",
+        author="Test",
+        duration_seconds=None,
+        language="he",
+        extraction_method="pypdf",
+    )
+    content_id = db.save_content(item, "[p.1] אגירת אנרגיה וסוללות לרשת החשמל")
+    db.replace_chunks(content_id, [{
+        "ordinal": 0,
+        "start_seconds": 0.0,
+        "end_seconds": 1.0,
+        "text": "[p.1] אגירת אנרגיה וסוללות לרשת החשמל",
+        "map_summary": None,
+    }])
+    rows = db.search_library("מה כתוב על אגירת אנרגיה?")
+    assert rows
+    assert rows[0]["content_id"] == content_id
+    assert "אגירת אנרגיה" in rows[0]["text"]
+    assert db.search_library("מונחשאיננוקייםבמאגר") == []

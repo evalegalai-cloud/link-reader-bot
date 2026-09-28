@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -84,6 +85,20 @@ class Database:
             for name, sql_type in additions.items():
                 if name not in columns:
                     conn.execute(f"ALTER TABLE content ADD COLUMN {name} {sql_type}")
+            try:
+                conn.execute(
+                    """CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
+                       content_id UNINDEXED, chunk_id UNINDEXED, title, text,
+                       tokenize='unicode61'
+                    )"""
+                )
+                conn.execute(
+                    """INSERT OR REPLACE INTO chunk_fts(rowid, content_id, chunk_id, title, text)
+                       SELECT ch.id, ch.content_id, ch.id, c.title, ch.text
+                       FROM chunks ch JOIN content c ON c.id=ch.content_id"""
+                )
+            except sqlite3.OperationalError:
+                pass
 
     def get_content_by_external_id(self, source_type: str, external_id: str):
         with self.connect() as conn:
@@ -122,6 +137,17 @@ class Database:
                     for c in chunks
                 ],
             )
+            try:
+                conn.execute("DELETE FROM chunk_fts WHERE content_id=?", (content_id,))
+                conn.execute(
+                    """INSERT INTO chunk_fts(rowid, content_id, chunk_id, title, text)
+                       SELECT ch.id, ch.content_id, ch.id, c.title, ch.text
+                       FROM chunks ch JOIN content c ON c.id=ch.content_id
+                       WHERE ch.content_id=?""",
+                    (content_id,),
+                )
+            except sqlite3.OperationalError:
+                pass
 
     def set_summary(self, content_id: int, summary: str) -> None:
         with self.connect() as conn:
@@ -198,6 +224,57 @@ class Database:
                 "SELECT id, title, source_type, created_at FROM content ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
+
+    def search_library(self, query: str, limit: int = 8):
+        stopwords = {
+            "מה", "מי", "איך", "האם", "על", "של", "את", "זה", "זו", "עם", "כל",
+            "בכל", "לי", "לגבי", "אמר", "אמרו", "יש", "אין", "מצא", "חפש", "שאל",
+            "הכל", "המקורות", "מקורות", "the", "a", "an", "of", "to", "in", "on",
+            "and", "or", "what", "how", "about", "find", "search", "all",
+        }
+        terms = []
+        for term in re.findall(r"[\w\u0590-\u05FF]+", query or "", flags=re.UNICODE):
+            clean = term.strip("_").casefold()
+            if len(clean) < 2 or clean in stopwords or clean in terms:
+                continue
+            terms.append(clean)
+            if len(terms) >= 10:
+                break
+        if not terms:
+            return []
+
+        with self.connect() as conn:
+            try:
+                fts_query = " OR ".join(f'"{term.replace(chr(34), "")}"' for term in terms)
+                return conn.execute(
+                    """SELECT c.id AS content_id, c.title, c.source_type, c.url,
+                              ch.ordinal, ch.text,
+                              bm25(chunk_fts, 0.0, 0.0, 4.0, 1.0) AS rank
+                       FROM chunk_fts
+                       JOIN chunks ch ON ch.id=chunk_fts.rowid
+                       JOIN content c ON c.id=ch.content_id
+                       WHERE chunk_fts MATCH ?
+                       ORDER BY rank
+                       LIMIT ?""",
+                    (fts_query, max(1, min(int(limit), 30))),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                clauses = []
+                params = []
+                for term in terms:
+                    clauses.append("(lower(c.title) LIKE ? OR lower(ch.text) LIKE ?)")
+                    like = f"%{term}%"
+                    params.extend((like, like))
+                params.append(max(1, min(int(limit), 30)))
+                return conn.execute(
+                    f"""SELECT c.id AS content_id, c.title, c.source_type, c.url,
+                               ch.ordinal, ch.text, 0.0 AS rank
+                        FROM chunks ch JOIN content c ON c.id=ch.content_id
+                        WHERE {' OR '.join(clauses)}
+                        ORDER BY c.id DESC, ch.ordinal
+                        LIMIT ?""",
+                    params,
+                ).fetchall()
 
     def get_bot_owner(self) -> int | None:
         with self.connect() as conn:

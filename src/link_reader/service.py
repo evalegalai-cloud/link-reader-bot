@@ -28,6 +28,14 @@ When possible, cite the exact source reference: a timestamp such as [MM:SS], an 
 If the excerpts do not support an answer, say so clearly instead of guessing.
 When answering in Hebrew, on the first meaningful occurrence of an important foreign proper name, technical term, title, Latin/Greek expression, or term whose original spelling matters, include the original-language form in parentheses after the Hebrew form. Do this selectively, not for ordinary words.
 Use **double asterisks** only for genuine emphasis; the Telegram client will render them as bold."""
+LIBRARY_QA_SYSTEM = """Answer only from the supplied excerpts from the user's saved source library.
+Do not use outside knowledge or guess.
+For every substantive claim, cite the source as [#ID] using the supplied source ID.
+When an excerpt already contains a page, section, chapter, or timestamp reference, preserve that reference too when useful.
+If the retrieved excerpts are insufficient, say so clearly.
+Keep sources distinct when they disagree or address different things.
+Answer in Hebrew by default unless the user asks for another language."""
+
 TRANSLATE_SYSTEM = """Translate every supplied segment completely and faithfully into the target language.
 Do not summarize, shorten, merge, skip, or reorder segments.
 Each input segment starts with an internal ID like [S000001]. Preserve every ID exactly once and in the same order.
@@ -240,6 +248,58 @@ class ContentService:
             end = seg.start + seg.duration
         flush()
         return chunks
+
+    def search_library(self, query: str, limit: int = 8):
+        return self.db.search_library(query, limit=limit)
+
+    def library_search_text(self, query: str, limit: int = 6) -> str:
+        rows = self.search_library(query, limit=limit)
+        if not rows:
+            return "לא מצאתי התאמות בספריית המקורות."
+        lines = ["נמצאו התאמות:"]
+        seen = set()
+        number = 1
+        for row in rows:
+            key = (row["content_id"], row["ordinal"])
+            if key in seen:
+                continue
+            seen.add(key)
+            snippet = re.sub(r"\s+", " ", row["text"] or "").strip()
+            if len(snippet) > 260:
+                snippet = snippet[:257].rstrip() + "…"
+            lines.append(
+                f"{number}. [#{row['content_id']}] {row['title']} "
+                f"({row['source_type']}, קטע {row['ordinal']})\n{snippet}"
+            )
+            number += 1
+            if number > limit:
+                break
+        return "\n\n".join(lines)
+
+    async def answer_library(self, question: str) -> str:
+        rows = self.search_library(question, limit=10)
+        if not rows:
+            return "לא מצאתי בספריית המקורות חומר שמספיק כדי לענות על השאלה."
+        evidence = []
+        for row in rows:
+            text = (row["text"] or "").strip()
+            if len(text) > 5000:
+                text = text[:5000].rstrip() + "…"
+            evidence.append(
+                f"--- Source #{row['content_id']} | {row['title']} | "
+                f"{row['source_type']} | chunk {row['ordinal']} ---\n{text}"
+            )
+        prompt = (
+            f"שאלה: {question}\n\n"
+            "קטעים שנשלפו מספריית המקורות:\n" + "\n\n".join(evidence)
+        )
+        return await self.llm.complete(
+            LIBRARY_QA_SYSTEM + f"\nDefault answer language: {self.target_language}.",
+            prompt,
+            max_tokens=1400,
+            tier="smart",
+            reasoning_effort="none",
+        )
 
     async def answer(self, user_id: int, question: str) -> str:
         content = self.db.get_current_content(user_id)

@@ -43,6 +43,8 @@ class TelegramBot:
         app.add_handler(CommandHandler("transcript", self.transcript))
         app.add_handler(CommandHandler("videos", self.videos))
         app.add_handler(CommandHandler("use", self.use_content))
+        app.add_handler(CommandHandler("search", self.search_library))
+        app.add_handler(CommandHandler("askall", self.ask_all))
         app.add_handler(CallbackQueryHandler(self.callback))
         app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.Document.AUDIO, self.audio_message))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.message))
@@ -92,8 +94,14 @@ class TelegramBot:
         if not self._authorized(update):
             return await self._deny(update)
         text = (update.effective_message.text or "").strip()
-        match = URL_RE.search(text)
         user_id = update.effective_user.id
+        library_question = re.match(r"^(?:שאל\s+הכל|askall)\s+(.+)$", text, re.IGNORECASE)
+        if library_question:
+            return await self._handle_library_answer(update, library_question.group(1).strip(), user_id)
+        library_search = re.match(r"^(?:חפש|search)\s+(.+)$", text, re.IGNORECASE)
+        if library_search:
+            return await self._handle_library_search(update, library_search.group(1).strip(), user_id)
+        match = URL_RE.search(text)
         if match:
             return await self._handle_url(update, match.group(0), user_id)
         return await self._handle_question(update, text, user_id)
@@ -230,6 +238,37 @@ class TelegramBot:
                     self._friendly_error(exc), reply_markup=self._content_keyboard()
                 )
 
+    async def search_library(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._authorized(update):
+            return await self._deny(update)
+        query = " ".join(context.args or []).strip()
+        if not query:
+            return await update.effective_message.reply_text("שימוש: /search מילות חיפוש")
+        await self._handle_library_search(update, query, update.effective_user.id)
+
+    async def ask_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._authorized(update):
+            return await self._deny(update)
+        question = " ".join(context.args or []).strip()
+        if not question:
+            return await update.effective_message.reply_text("שימוש: /askall שאלה על כל המקורות")
+        await self._handle_library_answer(update, question, update.effective_user.id)
+
+    async def _handle_library_search(self, update: Update, query: str, user_id: int):
+        async with self._locks[user_id]:
+            text = self.service.library_search_text(query)
+            await self._send_long(update.effective_message, text, reply_markup=self._home_keyboard())
+
+    async def _handle_library_answer(self, update: Update, question: str, user_id: int):
+        async with self._locks[user_id]:
+            status = await update.effective_message.reply_text("מחפש בכל המקורות…")
+            try:
+                answer = await self.service.answer_library(question)
+                await status.delete()
+                await self._send_long(update.effective_message, answer, reply_markup=self._home_keyboard())
+            except Exception as exc:
+                await status.edit_text(self._friendly_error(exc), reply_markup=self._home_keyboard())
+
     async def translate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._authorized(update):
             return await self._deny(update)
@@ -364,12 +403,17 @@ class TelegramBot:
             "נתמך עכשיו:\n"
             "• YouTube\n"
             "• כתבות ואתרים\n"
-            "• PDF עם שכבת טקסט\n"
-            "• הודעות קוליות וקבצי אודיו\n"
-            "• MP3 / M4A / WAV ועוד\n"
+            "• PDF, כולל OCR למסמכים סרוקים\n"
+            "• EPUB\n"
+            "• פודקאסטים / RSS / קבצי אודיו\n"
+            "• Reddit כולל תגובות\n"
+            "• הודעות קוליות\n"
             "• TikTok / Instagram / Facebook ציבוריים\n"
             "• X עם וידאו — ניסיוני\n\n"
-            "PDF סרוק ללא טקסט עדיין דורש OCR."
+            "ספריית ידע:\n"
+            "• /search מילות חיפוש\n"
+            "• /askall שאלה על כל המקורות\n"
+            "אפשר גם לכתוב: חפש … / שאל הכל …"
         )
 
     def _home_keyboard(self):
@@ -408,6 +452,9 @@ class TelegramBot:
             "youtube": "YouTube",
             "web": "כתבה",
             "pdf": "PDF",
+            "epub": "EPUB",
+            "podcast": "פודקאסט",
+            "reddit": "Reddit",
             "audio": "אודיו",
             "voice": "קול",
             "social_video": "וידאו",
