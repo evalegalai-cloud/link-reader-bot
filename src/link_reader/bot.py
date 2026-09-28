@@ -98,18 +98,21 @@ class TelegramBot:
 
         if text == "📌 מקור נוכחי":
             current = self.service.db.get_current_content(user_id)
-            body = f"מקור נוכחי:\n{current['title']}" if current else "אין כרגע מקור פעיל. שלח קישור."
+            body = (
+                f"📌 מקור נוכחי: {current['title']}\n{self._source_label(current['source_type'])}"
+                if current else "אין כרגע מקור פעיל. שלח קישור, מסמך או טקסט."
+            )
             return await update.effective_message.reply_text(body)
         if text == "🗂️ אחרונים":
-            rows = self.service.db.list_recent_content(10)
+            rows = self.service.db.list_recent_content(user_id, 10)
             if not rows:
                 return await update.effective_message.reply_text("אין עדיין מקורות שמורים.")
             return await update.effective_message.reply_text(
                 "בחר מקור:", reply_markup=self._videos_keyboard(rows)
             )
-        if text == "ℹ️ מה נתמך":
+        if text in {"❓ עזרה", "ℹ️ מה נתמך"}:
             return await update.effective_message.reply_text(self._supported_text())
-        if text == "🔎 כל המקורות":
+        if text in {"🔎 הספרייה", "🔎 כל המקורות"}:
             context.user_data["next_mode"] = "library"
             return await update.effective_message.reply_text(
                 "כתוב או הקלט עכשיו שאלה; אחפש בכל המקורות השמורים."
@@ -187,24 +190,26 @@ class TelegramBot:
                     if not question:
                         raise ValueError("לא הצלחתי להבין את ההודעה הקולית.")
                     forced_mode = context.user_data.pop("next_mode", None)
-                    answer, _mode = await self.service.answer_freeform(
+                    answer, mode = await self.service.answer_freeform(
                         user_id, question, force_mode=forced_mode
                     )
+                    answer = self._answer_context(user_id, mode) + answer
                     await status.delete()
                     return await self._send_long(
                         message, answer, reply_markup=self._content_keyboard()
                     )
 
                 started = time.monotonic()
-                content, cached = await self.service.ingest_item(item, user_id)
+                async def progress(label: str):
+                    try:
+                        await status.edit_text(label)
+                    except Exception:
+                        pass
+                content, cached = await self.service.ingest_item(
+                    item, user_id, progress=progress
+                )
                 elapsed = time.monotonic() - started
-                prefix = "שמור\n\n" if cached else ""
-                footer = f"\n\n**זמן:** {self._format_duration(elapsed)}"
-                keys = set(content.keys())
-                cost = content["processing_cost_usd"] if "processing_cost_usd" in keys else None
-                if cost is not None:
-                    footer += f" · **עלות:** {self._format_cost(cost)}"
-                body = f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
+                body = self._ingested_text(content, cached=cached)
                 chunks = self._split_text(body)
                 await status.edit_text(
                     self._telegram_html(chunks[0]),
@@ -230,17 +235,18 @@ class TelegramBot:
     async def _handle_pasted_text(self, update: Update, text: str, user_id: int):
         async with self._locks[user_id]:
             started = time.monotonic()
-            status = await update.effective_message.reply_text("שומר ומסכם את הטקסט…")
+            status = await update.effective_message.reply_text("קורא את הטקסט…")
+            async def progress(label: str):
+                try:
+                    await status.edit_text(label)
+                except Exception:
+                    pass
             try:
-                content, cached = await self.service.ingest_text(text, user_id)
+                content, cached = await self.service.ingest_text(
+                    text, user_id, progress=progress
+                )
                 elapsed = time.monotonic() - started
-                prefix = "שמור\n\n" if cached else ""
-                footer = f"\n\n**זמן:** {self._format_duration(elapsed)}"
-                keys = set(content.keys())
-                cost = content["processing_cost_usd"] if "processing_cost_usd" in keys else None
-                if cost is not None:
-                    footer += f" · **עלות:** {self._format_cost(cost)}"
-                body = f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
+                body = self._ingested_text(content, cached=cached)
                 chunks = self._split_text(body)
                 await status.edit_text(
                     self._telegram_html(chunks[0]),
@@ -263,17 +269,18 @@ class TelegramBot:
     async def _handle_url(self, update: Update, url: str, user_id: int):
         async with self._locks[user_id]:
             started = time.monotonic()
-            status = await update.effective_message.reply_text("מעבד…")
+            status = await update.effective_message.reply_text("פותח את המקור…")
+            async def progress(label: str):
+                try:
+                    await status.edit_text(label)
+                except Exception:
+                    pass
             try:
-                content, cached = await self.service.ingest(url, user_id)
+                content, cached = await self.service.ingest(
+                    url, user_id, progress=progress
+                )
                 elapsed = time.monotonic() - started
-                prefix = "שמור\n\n" if cached else ""
-                footer = f"\n\n**זמן:** {self._format_duration(elapsed)}"
-                keys = set(content.keys())
-                cost = content["processing_cost_usd"] if "processing_cost_usd" in keys else None
-                if cost is not None:
-                    footer += f" · **עלות:** {self._format_cost(cost)}"
-                body = f"{prefix}{content['title']}\n\n{content['summary']}{footer}"
+                body = self._ingested_text(content, cached=cached)
                 chunks = self._split_text(body)
                 await status.edit_text(
                     self._telegram_html(chunks[0]),
@@ -301,9 +308,10 @@ class TelegramBot:
         async with self._locks[user_id]:
             status = await update.effective_message.reply_text("בודק…")
             try:
-                answer, _mode = await self.service.answer_freeform(
+                answer, mode = await self.service.answer_freeform(
                     user_id, question, force_mode=force_mode
                 )
+                answer = self._answer_context(user_id, mode) + answer
                 await status.delete()
                 await self._send_long(
                     update.effective_message, answer, reply_markup=self._content_keyboard()
@@ -331,14 +339,14 @@ class TelegramBot:
 
     async def _handle_library_search(self, update: Update, query: str, user_id: int):
         async with self._locks[user_id]:
-            text = self.service.library_search_text(query)
+            text = self.service.library_search_text(user_id, query)
             await self._send_long(update.effective_message, text, reply_markup=self._home_keyboard())
 
     async def _handle_library_answer(self, update: Update, question: str, user_id: int):
         async with self._locks[user_id]:
             status = await update.effective_message.reply_text("מחפש בכל המקורות…")
             try:
-                answer = await self.service.answer_library(question)
+                answer = await self.service.answer_library(user_id, question)
                 await status.delete()
                 await self._send_long(update.effective_message, answer, reply_markup=self._home_keyboard())
             except Exception as exc:
@@ -387,7 +395,7 @@ class TelegramBot:
     async def videos(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._authorized(update):
             return await self._deny(update)
-        rows = self.service.db.list_recent_content(10)
+        rows = self.service.db.list_recent_content(update.effective_user.id, 10)
         if not rows:
             return await update.effective_message.reply_text("אין עדיין מקורות שמורים.")
         await update.effective_message.reply_text(
@@ -400,7 +408,7 @@ class TelegramBot:
             return await self._deny(update)
         if not context.args or not context.args[0].isdigit():
             return await update.effective_message.reply_text("/use ID")
-        content = self.service.db.get_content(int(context.args[0]))
+        content = self.service.db.get_user_content(update.effective_user.id, int(context.args[0]))
         if not content:
             return await update.effective_message.reply_text("לא מצאתי את המקור.")
         self.service.db.set_current_content(update.effective_user.id, content["id"])
@@ -444,7 +452,7 @@ class TelegramBot:
         if query.data == "transcript":
             return await self.transcript(update, context)
         if query.data == "videos":
-            rows = self.service.db.list_recent_content(10)
+            rows = self.service.db.list_recent_content(user_id, 10)
             if not rows:
                 return await query.edit_message_text(
                     "אין עדיין מקורות שמורים.", reply_markup=self._nav_keyboard()
@@ -456,7 +464,7 @@ class TelegramBot:
             content_id = query.data.split(":", 1)[1]
             if not content_id.isdigit():
                 return
-            content = self.service.db.get_content(int(content_id))
+            content = self.service.db.get_user_content(user_id, int(content_id))
             if not content:
                 return await query.edit_message_text(
                     "לא מצאתי את המקור.", reply_markup=self._nav_keyboard()
@@ -469,39 +477,78 @@ class TelegramBot:
 
     def _home_text(self, user_id: int) -> str:
         current = self.service.db.get_current_content(user_id)
+        intro = (
+            "שלום, אני Link Reader.\n\n"
+            "שלחו לי קישור, PDF, ספר, טקסט ארוך, אודיו או הודעה קולית. "
+            "אקרא את המקור, אסכם אותו, ואחר כך אפשר פשוט לשאול עליו שאלות.\n\n"
+            "לדוגמה:\n"
+            "• סכם לי ב־5 נקודות\n"
+            "• מה הטענה המרכזית?\n"
+            "• איפה הוא מדבר על X?\n"
+            "• תרגם לעברית\n"
+            "• חפש באינטרנט מה השתנה מאז"
+        )
         if current:
-            return f"שלח קישור חדש, או המשך עם:\n{current['title']}"
-        return "שלח קישור או הודעה קולית כדי להתחיל."
+            return intro + f"\n\n📌 מקור נוכחי: {current['title']}"
+        return intro
 
     def _supported_text(self) -> str:
         return (
-            "נתמך עכשיו:\n"
-            "• YouTube\n"
-            "• כתבות ואתרים\n"
-            "• PDF, כולל OCR למסמכים סרוקים\n"
-            "• EPUB\n"
-            "• פודקאסטים / RSS / קבצי אודיו\n"
-            "• Reddit כולל תגובות\n"
-            "• הודעות קוליות\n"
-            "• TikTok / Instagram / Facebook ציבוריים\n"
-            "• X עם וידאו — ניסיוני\n\n"
-            "ספריית ידע:\n"
-            "• /search מילות חיפוש\n"
-            "• /askall שאלה על כל המקורות\n"
-            "אפשר גם לכתוב: חפש … / שאל הכל …"
+            "❓ Link Reader — עזרה\n\n"
+            "מה אפשר לשלוח?\n"
+            "• קישור לכתבה, אתר, YouTube, פודקאסט או תוכן ציבורי ברשת\n"
+            "• PDF ו־EPUB, כולל PDF סרוק עם OCR\n"
+            "• קובץ אודיו או הודעה קולית\n"
+            "• טקסט ארוך בהדבקה ישירה\n\n"
+            "מה אפשר לבקש?\n"
+            "• סיכום, הסבר, תרגום או איתור נקודה במקור\n"
+            "• שאלות המשך בשפה חופשית\n"
+            "• חיפוש והשוואה בין מקורות ששמרת\n"
+            "• מידע עדכני: פשוט כתוב “חפש באינטרנט …”\n\n"
+            "הספרייה שלך\n"
+            "• 🔎 הספרייה — שאלה על כל המקורות שלך\n"
+            "• 🗂️ אחרונים — מעבר למקור קודם\n"
+            "• 📌 מקור נוכחי — לראות על מה השיחה מבוססת\n\n"
+            "אם עמוד דורש התחברות ולא ניתן לקרוא אותו, אפשר להדביק כאן את הטקסט "
+            "או לשלוח את הקובץ עצמו."
         )
 
     def _persistent_menu(self):
         return ReplyKeyboardMarkup(
             [
                 [KeyboardButton("📌 מקור נוכחי"), KeyboardButton("🗂️ אחרונים")],
-                [KeyboardButton("🔎 כל המקורות"), KeyboardButton("🌐 אינטרנט")],
-                [KeyboardButton("ℹ️ מה נתמך")],
+                [KeyboardButton("🔎 הספרייה"), KeyboardButton("❓ עזרה")],
             ],
             resize_keyboard=True,
             is_persistent=True,
-            input_field_placeholder="כתוב חופשי או שלח הודעה קולית…",
+            input_field_placeholder="שלח מקור או שאל שאלה…",
         )
+
+    def _ingested_text(self, content, *, cached: bool) -> str:
+        status = "✅ מוכן" if cached else "✅ נקלט"
+        details = self._source_label(content["source_type"])
+        keys = set(content.keys())
+        duration = content["duration_seconds"] if "duration_seconds" in keys else None
+        if duration:
+            details += f" · {self._format_duration(duration)}"
+        return (
+            f"{status}: **{content['title']}**\n"
+            f"{details}\n\n"
+            f"{content['summary']}\n\n"
+            "אפשר עכשיו לשאול על המקור, לבקש תרגום מלא או לפתוח את הטקסט המלא."
+        )
+
+    def _answer_context(self, user_id: int, mode: str) -> str:
+        current = self.service.db.get_current_content(user_id)
+        if mode == "source" and current:
+            return f"📌 על בסיס: **{current['title']}**\n\n"
+        if mode == "library":
+            return "🔎 על בסיס הספרייה שלך\n\n"
+        if mode == "web":
+            if current:
+                return "🌐 המקור הנוכחי + מידע חיצוני עדכני\n\n"
+            return "🌐 מידע חיצוני עדכני\n\n"
+        return ""
 
     def _home_keyboard(self):
         # Global navigation lives in the persistent reply keyboard below the input box.
@@ -626,8 +673,14 @@ class TelegramBot:
             return "יש עומס זמני. נסה שוב בעוד רגע."
         if "credit" in lower or "billing" in lower or "entitlement" in lower or "quota" in lower:
             return "נגמרה מכסת ה-API."
+        if "403" in lower or "forbidden" in lower or "login" in lower or "sign in" in lower:
+            return "לא הצלחתי לקרוא את המקור. ייתכן שהוא דורש התחברות; אפשר להדביק כאן את הטקסט או לשלוח קובץ."
+        if "404" in lower or "not found" in lower:
+            return "לא מצאתי את המקור בקישור הזה. בדוק שהקישור תקין או שלח את הקובץ עצמו."
+        if "not supported" in lower or "לא נתמך" in text:
+            return "הסוג הזה עדיין לא נתמך ישירות. אפשר להדביק את הטקסט או לשלוח PDF/אודיו."
         if text and all(ord(ch) < 128 for ch in text[:120]):
-            return "אירעה שגיאה. נסה שוב."
+            return "לא הצלחתי להשלים את הפעולה. נסה שוב, ואם זה קישור סגור — שלח את הטקסט או הקובץ."
         return text[:220] if text else "אירעה שגיאה. נסה שוב."
 
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):

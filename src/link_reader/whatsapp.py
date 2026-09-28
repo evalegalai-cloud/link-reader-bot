@@ -268,12 +268,12 @@ class WhatsAppGateway:
 
         library_question = re.match(r"^(?:שאל\s+הכל|askall)\s+(.+)$", text, re.IGNORECASE)
         if library_question:
-            answer = await self.service.answer_library(library_question.group(1).strip())
+            answer = await self.service.answer_library(user_id, library_question.group(1).strip())
             return await self.send_text(sender, answer)
         library_search = re.match(r"^(?:חפש|search)\s+(.+)$", text, re.IGNORECASE)
         if library_search:
             return await self.send_text(
-                sender, self.service.library_search_text(library_search.group(1).strip())
+                sender, self.service.library_search_text(user_id, library_search.group(1).strip())
             )
         if lowered in {"עזרה", "תפריט", "help", "menu"}:
             return await self.send_text(sender, self.help_text(user_id))
@@ -282,14 +282,14 @@ class WhatsAppGateway:
             body = f"מקור נוכחי: {current['title']}" if current else "אין מקור נוכחי. שלח קישור או הודעה קולית."
             return await self.send_text(sender, body)
         if lowered in {"אחרונים", "recent"}:
-            rows = self.service.db.list_recent_content(8)
+            rows = self.service.db.list_recent_content(user_id, 8)
             if not rows:
                 return await self.send_text(sender, "אין עדיין מקורות שמורים.")
             lines = [f"{row['id']} · {row['title']}" for row in rows]
             return await self.send_text(sender, "אחרונים:\n" + "\n".join(lines) + "\n\nלבחירה: בחר 12")
         select = re.match(r"^(?:בחר|use)\s+(\d+)\s*$", text, re.IGNORECASE)
         if select:
-            content = self.service.db.get_content(int(select.group(1)))
+            content = self.service.db.get_user_content(user_id, int(select.group(1)))
             if not content:
                 return await self.send_text(sender, "לא מצאתי את המקור.")
             self.service.db.set_current_content(user_id, content["id"])
@@ -419,15 +419,17 @@ class WhatsAppGateway:
     def help_text(self, user_id: int) -> str:
         current = self.service.db.get_current_content(user_id)
         lines = [
-            "שלח קישור, טקסט או הודעה קולית.",
-            "קישור חדש יוצר מקור; טקסט חופשי נשאל כברירת מחדל על המקור הנוכחי.",
-            "הודעה קולית קצרה היא שאלה חופשית; הודעה/קובץ ארוכים נשמרים כמקור.",
-            "אפשר לכתוב: מקור נוכחי · אחרונים · תפריט",
-            "ספרייה: חפש <מילים> · שאל הכל <שאלה>",
-            "אינטרנט: כתוב במפורש 'בדוק באינטרנט' / 'ידע כללי' / שאלה עדכנית.",
+            "Link Reader",
+            "",
+            "שלח קישור, PDF, טקסט ארוך, אודיו או הודעה קולית.",
+            "אחרי שהמקור נקלט אפשר פשוט לשאול עליו בשפה חופשית.",
+            "",
+            "אפשר לבקש: סיכום · הסבר · תרגום · איתור נקודה במקור.",
+            "ספרייה: חפש <מילים> · שאל הכל <שאלה> · אחרונים.",
+            "למידע עדכני כתוב במפורש: בדוק באינטרנט …",
         ]
         if current:
-            lines.append(f"\nמקור נוכחי: {current['title']}")
+            lines.extend(["", f"📌 מקור נוכחי: {current['title']}"])
         return "\n".join(lines)
 
     def _split(self, text: str, limit: int = 3500) -> list[str]:

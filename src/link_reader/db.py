@@ -50,6 +50,14 @@ class Database:
             content_id INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS user_content (
+            user_id INTEGER NOT NULL,
+            content_id INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
+            saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(user_id, content_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_content_recent
+            ON user_content(user_id, saved_at DESC, content_id DESC);
         CREATE TABLE IF NOT EXISTS qa_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -68,6 +76,10 @@ class Database:
             event_id TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY(channel, event_id)
+        );
+        CREATE TABLE IF NOT EXISTS app_migrations (
+            migration_key TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         """
         with self.connect() as conn:
@@ -99,6 +111,36 @@ class Database:
                 )
             except sqlite3.OperationalError:
                 pass
+
+            # Versioned, idempotent migration for installations that predate
+            # per-user libraries. Existing current-source and Q&A relationships
+            # are preserved; the old personal corpus belongs to the claimed owner.
+            migrated = conn.execute(
+                "SELECT 1 FROM app_migrations WHERE migration_key=?",
+                ("user_content_v1",),
+            ).fetchone()
+            if not migrated:
+                conn.execute(
+                    """INSERT OR IGNORE INTO user_content(user_id, content_id)
+                       SELECT user_id, content_id FROM user_state"""
+                )
+                conn.execute(
+                    """INSERT OR IGNORE INTO user_content(user_id, content_id)
+                       SELECT DISTINCT user_id, content_id FROM qa_history"""
+                )
+                owner = conn.execute(
+                    "SELECT user_id FROM bot_owner WHERE slot=1"
+                ).fetchone()
+                if owner:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO user_content(user_id, content_id)
+                           SELECT ?, id FROM content""",
+                        (int(owner["user_id"]),),
+                    )
+                conn.execute(
+                    "INSERT OR IGNORE INTO app_migrations(migration_key) VALUES (?)",
+                    ("user_content_v1",),
+                )
 
     def get_content_by_external_id(self, source_type: str, external_id: str):
         with self.connect() as conn:
@@ -172,8 +214,31 @@ class Database:
                 ),
             )
 
+    def save_user_content(self, user_id: int, content_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO user_content(user_id, content_id)
+                   VALUES (?, ?)""",
+                (user_id, content_id),
+            )
+
+    def get_user_content(self, user_id: int, content_id: int):
+        with self.connect() as conn:
+            return conn.execute(
+                """SELECT c.* FROM content c
+                   JOIN user_content uc ON uc.content_id=c.id
+                   WHERE uc.user_id=? AND c.id=?""",
+                (user_id, content_id),
+            ).fetchone()
+
     def set_current_content(self, user_id: int, content_id: int) -> None:
         with self.connect() as conn:
+            owned = conn.execute(
+                "SELECT 1 FROM user_content WHERE user_id=? AND content_id=?",
+                (user_id, content_id),
+            ).fetchone()
+            if not owned:
+                raise ValueError("המקור הזה אינו נמצא בספרייה שלך.")
             conn.execute(
                 """INSERT INTO user_state(user_id, content_id) VALUES (?, ?)
                    ON CONFLICT(user_id) DO UPDATE SET
@@ -186,6 +251,8 @@ class Database:
             return conn.execute(
                 """SELECT c.* FROM content c
                    JOIN user_state u ON u.content_id=c.id
+                   JOIN user_content uc
+                     ON uc.user_id=u.user_id AND uc.content_id=c.id
                    WHERE u.user_id=?""",
                 (user_id,),
             ).fetchone()
@@ -218,14 +285,19 @@ class Database:
             ).fetchall()
         return list(reversed(rows))
 
-    def list_recent_content(self, limit: int = 10):
+    def list_recent_content(self, user_id: int, limit: int = 10):
         with self.connect() as conn:
             return conn.execute(
-                "SELECT id, title, source_type, created_at FROM content ORDER BY id DESC LIMIT ?",
-                (limit,),
+                """SELECT c.id, c.title, c.source_type, c.created_at
+                   FROM user_content uc
+                   JOIN content c ON c.id=uc.content_id
+                   WHERE uc.user_id=?
+                   ORDER BY uc.saved_at DESC, c.id DESC
+                   LIMIT ?""",
+                (user_id, limit),
             ).fetchall()
 
-    def search_library(self, query: str, limit: int = 8):
+    def search_library(self, user_id: int, query: str, limit: int = 8):
         stopwords = {
             "מה", "מי", "איך", "האם", "על", "של", "את", "זה", "זו", "עם", "כל",
             "בכל", "לי", "לגבי", "אמר", "אמרו", "יש", "אין", "מצא", "חפש", "שאל",
@@ -253,10 +325,11 @@ class Database:
                        FROM chunk_fts
                        JOIN chunks ch ON ch.id=chunk_fts.rowid
                        JOIN content c ON c.id=ch.content_id
-                       WHERE chunk_fts MATCH ?
+                       JOIN user_content uc ON uc.content_id=c.id
+                       WHERE uc.user_id=? AND chunk_fts MATCH ?
                        ORDER BY rank
                        LIMIT ?""",
-                    (fts_query, max(1, min(int(limit), 30))),
+                    (user_id, fts_query, max(1, min(int(limit), 30))),
                 ).fetchall()
             except sqlite3.OperationalError:
                 clauses = []
@@ -269,11 +342,13 @@ class Database:
                 return conn.execute(
                     f"""SELECT c.id AS content_id, c.title, c.source_type, c.url,
                                ch.ordinal, ch.text, 0.0 AS rank
-                        FROM chunks ch JOIN content c ON c.id=ch.content_id
-                        WHERE {' OR '.join(clauses)}
+                        FROM chunks ch
+                        JOIN content c ON c.id=ch.content_id
+                        JOIN user_content uc ON uc.content_id=c.id
+                        WHERE uc.user_id=? AND ({' OR '.join(clauses)})
                         ORDER BY c.id DESC, ch.ordinal
                         LIMIT ?""",
-                    params,
+                    [user_id, *params],
                 ).fetchall()
 
     def get_bot_owner(self) -> int | None:

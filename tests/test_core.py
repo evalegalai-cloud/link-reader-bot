@@ -360,11 +360,12 @@ def test_library_fts_search_indexes_saved_chunks(tmp_path):
         "text": "[p.1] אגירת אנרגיה וסוללות לרשת החשמל",
         "map_summary": None,
     }])
-    rows = db.search_library("מה כתוב על אגירת אנרגיה?")
+    db.save_user_content(101, content_id)
+    rows = db.search_library(101, "מה כתוב על אגירת אנרגיה?")
     assert rows
     assert rows[0]["content_id"] == content_id
     assert "אגירת אנרגיה" in rows[0]["text"]
-    assert db.search_library("מונחשאיננוקייםבמאגר") == []
+    assert db.search_library(101, "מונחשאיננוקייםבמאגר") == []
 
 
 def test_freeform_router_keeps_source_default_and_menu_persistent():
@@ -392,8 +393,9 @@ def test_freeform_router_keeps_source_default_and_menu_persistent():
     menu = TelegramBot(SimpleNamespace(), SimpleNamespace())._persistent_menu()
     labels = [button.text for row in menu.keyboard for button in row]
     assert menu.is_persistent is True
-    assert "🌐 אינטרנט" in labels
-    assert "🔎 כל המקורות" in labels
+    assert "🌐 אינטרנט" not in labels
+    assert "🔎 הספרייה" in labels
+    assert "❓ עזרה" in labels
 
 
 def test_pasted_article_becomes_new_text_source():
@@ -457,3 +459,54 @@ def test_twilio_whatsapp_signature_and_allowlist():
         allowed_numbers=frozenset(),
     )
     assert open_config.sender_allowed("whatsapp:+972501234567")
+
+
+def test_library_is_isolated_per_user(tmp_path):
+    from types import SimpleNamespace
+    from link_reader.db import Database
+
+    db = Database(str(tmp_path / "isolation.db"))
+    item = SimpleNamespace(
+        source_type="text",
+        external_id="private-source",
+        url="text://private-source",
+        title="מקור פרטי",
+        author=None,
+        duration_seconds=None,
+        language="he",
+        extraction_method="pasted_text",
+    )
+    content_id = db.save_content(item, "מידע ששייך למשתמש הראשון בלבד")
+    db.replace_chunks(content_id, [{
+        "ordinal": 0,
+        "start_seconds": 0.0,
+        "end_seconds": 1.0,
+        "text": "מידע ששייך למשתמש הראשון בלבד",
+        "map_summary": None,
+    }])
+    db.save_user_content(111, content_id)
+
+    assert db.get_user_content(111, content_id) is not None
+    assert db.get_user_content(222, content_id) is None
+    assert db.list_recent_content(111, 10)
+    assert db.list_recent_content(222, 10) == []
+    assert db.search_library(111, "מידע משתמש")
+    assert db.search_library(222, "מידע משתמש") == []
+
+    # Even a stale/forged user_state row cannot expose another user's content.
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO user_state(user_id, content_id) VALUES (?, ?)",
+            (222, content_id),
+        )
+    assert db.get_current_content(222) is None
+    with db.connect() as conn:
+        conn.execute("DELETE FROM user_state WHERE user_id=?", (222,))
+
+    db.set_current_content(111, content_id)
+    try:
+        db.set_current_content(222, content_id)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("user 222 must not be able to select user 111 content")

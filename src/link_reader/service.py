@@ -70,6 +70,10 @@ class ContentService:
                 return processor
         return None
 
+    async def _progress(self, callback, text: str) -> None:
+        if callback is not None:
+            await callback(text)
+
     def looks_like_pasted_source(self, text: str) -> bool:
         value = (text or "").strip()
         if len(value) < 350:
@@ -168,11 +172,12 @@ class ContentService:
             extraction_method="pasted_text",
         )
 
-    async def ingest_text(self, text: str, user_id: int):
+    async def ingest_text(self, text: str, user_id: int, progress=None):
+        await self._progress(progress, "קורא את הטקסט…")
         item = self._pasted_text_item(text)
-        return await self.ingest_item(item, user_id)
+        return await self.ingest_item(item, user_id, progress=progress)
 
-    async def ingest(self, url: str, user_id: int):
+    async def ingest(self, url: str, user_id: int, progress=None):
         processor = self.processor_for(url)
         if processor is None:
             raise ValueError("הקישור הזה עדיין לא נתמך.")
@@ -180,16 +185,19 @@ class ContentService:
         external_id = processor.external_id(url)
         cached = self.db.get_content_by_external_id(processor.source_type, external_id)
         if cached and cached["summary"]:
+            self.db.save_user_content(user_id, cached["id"])
             self.db.set_current_content(user_id, cached["id"])
             return cached, True
 
+        await self._progress(progress, "פותח וקורא את המקור…")
         item = await processor.extract(url)
-        return await self.ingest_item(item, user_id, cached=cached)
+        return await self.ingest_item(item, user_id, cached=cached, progress=progress)
 
-    async def ingest_item(self, item, user_id: int, cached=None):
+    async def ingest_item(self, item, user_id: int, cached=None, progress=None):
         if cached is None:
             cached = self.db.get_content_by_external_id(item.source_type, item.external_id)
         if cached and cached["summary"]:
+            self.db.save_user_content(user_id, cached["id"])
             self.db.set_current_content(user_id, cached["id"])
             return cached, True
 
@@ -202,11 +210,14 @@ class ContentService:
         else:
             content_id = self.db.save_content(item, transcript)
 
+        self.db.save_user_content(user_id, content_id)
+        await self._progress(progress, "מכין את המקור…")
         chunks = self._chunk_segments(item.segments)
         self.db.replace_chunks(content_id, chunks)
 
         usage_token, usage_tracker = self.llm.start_usage_tracking()
         try:
+            await self._progress(progress, "מסכם…")
             if len(transcript) <= 80_000:
                 time_based = item.source_type in {"youtube", "audio", "social_video", "voice"}
                 source_kind = "time-based transcript" if time_based else "section/page-marked document"
@@ -364,11 +375,11 @@ class ContentService:
         flush()
         return chunks
 
-    def search_library(self, query: str, limit: int = 8):
-        return self.db.search_library(query, limit=limit)
+    def search_library(self, user_id: int, query: str, limit: int = 8):
+        return self.db.search_library(user_id, query, limit=limit)
 
-    def library_search_text(self, query: str, limit: int = 6) -> str:
-        rows = self.search_library(query, limit=limit)
+    def library_search_text(self, user_id: int, query: str, limit: int = 6) -> str:
+        rows = self.search_library(user_id, query, limit=limit)
         if not rows:
             return "לא מצאתי התאמות בספריית המקורות."
         lines = ["נמצאו התאמות:"]
@@ -391,8 +402,8 @@ class ContentService:
                 break
         return "\n\n".join(lines)
 
-    async def answer_library(self, question: str) -> str:
-        rows = self.search_library(question, limit=10)
+    async def answer_library(self, user_id: int, question: str) -> str:
+        rows = self.search_library(user_id, question, limit=10)
         if not rows:
             return "לא מצאתי בספריית המקורות חומר שמספיק כדי לענות על השאלה."
         evidence = []
@@ -457,7 +468,7 @@ class ContentService:
     ) -> tuple[str, str]:
         mode = self._freeform_mode(user_id, question, force_mode=force_mode)
         if mode == "library":
-            return await self.answer_library(question), mode
+            return await self.answer_library(user_id, question), mode
         if mode == "web":
             return await self.answer_with_web(user_id, question), mode
         if mode == "source":
